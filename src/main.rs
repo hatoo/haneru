@@ -64,9 +64,13 @@ async fn proxy(
 
         builder.headers_mut().unwrap().clone_from(&p.headers);
         let new_req = builder.body(body.clone()).unwrap();
-        tx.send(Arc::new(new_req)).unwrap();
+        let _ = tx.send(Arc::new(new_req));
     }
     let req = Request::from_parts(p, Body::from(body));
+
+    if req.method() == hyper::Method::CONNECT {
+        todo!()
+    }
 
     let client = Client::new();
     client.request(req).await
