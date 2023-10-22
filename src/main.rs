@@ -16,7 +16,7 @@ use hyper::{
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::broadcast::{self, Receiver, Sender},
 };
@@ -96,9 +96,6 @@ async fn proxy(
         client.request(req).await
     }
 }
-fn host_addr(uri: &hyper::Uri) -> Option<String> {
-    uri.authority().and_then(|auth| Some(auth.to_string()))
-}
 
 async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
     let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
@@ -135,22 +132,30 @@ async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
         .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
         .await?;
 
-    let (mut rxc, mut txc) = tokio::io::split(stream_from_client);
-    let (mut rxs, mut txs) = tokio::io::split(stream_to_server);
-
-    let forward = tokio::spawn(async move {
-        dbg!(tokio::io::copy(&mut rxc, &mut txs).await);
-    });
-
     let mut buf = BytesMut::new();
+    let mut forward = [0u8; 1024];
     loop {
-        if let Ok(n) = rxs.read_buf(&mut buf).await {
-            if n == 0 {
-                break;
+        tokio::select! {
+            res = stream_to_server.read_buf(&mut buf) => {
+                if let Ok(n) = res {
+                    if n == 0 {
+                        break;
+                    }
+                    let _ = stream_from_client.write_all(&buf[buf.len() - n..]).await;
+                }else {
+                    break;
+                }
             }
-            let res = txc.write_all(&buf[buf.len() - n..]).await;
-        } else {
-            break;
+            res = stream_from_client.read(&mut forward) => {
+                if let Ok(n) = res {
+                    if n == 0 {
+                        break;
+                    }
+                    let _ = stream_to_server.write_all(&forward[..n]).await;
+                }else {
+                    break;
+                }
+            }
         }
     }
 
