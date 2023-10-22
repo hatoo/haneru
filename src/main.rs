@@ -4,6 +4,7 @@ use axum::{
     routing::get,
     Router,
 };
+use bytes::BytesMut;
 use futures::{stream, Stream, StreamExt};
 use hyper::{
     body::{to_bytes, Bytes},
@@ -15,6 +16,7 @@ use hyper::{
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     sync::broadcast::{self, Receiver, Sender},
 };
@@ -133,8 +135,26 @@ async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
         .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
         .await?;
 
-    // Proxying data
-    let _ = tokio::io::copy_bidirectional(&mut stream_from_client, &mut stream_to_server).await;
+    let (mut rxc, mut txc) = tokio::io::split(stream_from_client);
+    let (mut rxs, mut txs) = tokio::io::split(stream_to_server);
+
+    let forward = tokio::spawn(async move {
+        dbg!(tokio::io::copy(&mut rxc, &mut txs).await);
+    });
+
+    let mut buf = BytesMut::new();
+    loop {
+        if let Ok(n) = rxs.read_buf(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            let res = txc.write_all(&buf[buf.len() - n..]).await;
+        } else {
+            break;
+        }
+    }
+
+    dbg!(buf);
 
     Ok(())
 }

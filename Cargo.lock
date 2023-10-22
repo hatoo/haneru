@@ -375,6 +375,7 @@ dependencies = [
  "askama",
  "askama_axum",
  "axum",
+ "bytes",
  "futures",
  "http-body",
  "hyper",
