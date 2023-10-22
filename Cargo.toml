@@ -13,5 +13,8 @@ axum = "0.6.20"
 futures = "0.3.28"
 http-body = "0.4.5"
 hyper = { version = "0.14.27", features = ["full"] }
+hyper-rustls = "0.24.1"
+rcgen = "0.11.3"
+rustls = "0.21.7"
 tokio = { version = "1.33.0", features = ["full"] }
 tower-http = { version = "0.4.4", features = ["fs"] }

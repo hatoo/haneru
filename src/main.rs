@@ -7,11 +7,16 @@ use axum::{
 use futures::{stream, Stream, StreamExt};
 use hyper::{
     body::{to_bytes, Bytes},
+    client::HttpConnector,
     service::{make_service_fn, service_fn},
+    upgrade::Upgraded,
     Body, Client, Request, Response, Server,
 };
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
-use tokio::sync::broadcast::{self, Receiver, Sender};
+use tokio::{
+    net::TcpStream,
+    sync::broadcast::{self, Receiver, Sender},
+};
 use tower_http::services::ServeDir;
 
 #[tokio::main]
@@ -50,6 +55,7 @@ async fn root() -> Index {
 
 async fn proxy(
     req: Request<Body>,
+    client: Client<HttpConnector>,
     tx: Sender<Arc<Request<Bytes>>>,
 ) -> Result<Response<Body>, hyper::Error> {
     // tx.send(req.clone()).unwrap();
@@ -69,19 +75,63 @@ async fn proxy(
     let req = Request::from_parts(p, Body::from(body));
 
     if req.method() == hyper::Method::CONNECT {
-        todo!()
-    }
+        if let Some(addr) = host_addr(req.uri()) {
+            tokio::task::spawn(async move {
+                match hyper::upgrade::on(req).await {
+                    Ok(upgraded) => {
+                        if let Err(e) = tunnel(upgraded, addr).await {
+                            eprintln!("server io error: {}", e);
+                        };
+                    }
+                    Err(e) => eprintln!("upgrade error: {}", e),
+                }
+            });
 
-    let client = Client::new();
-    client.request(req).await
+            Ok(Response::new(Body::empty()))
+        } else {
+            eprintln!("CONNECT host is not socket addr: {:?}", req.uri());
+            let mut resp = Response::new(Body::from("CONNECT must be to a socket address"));
+            *resp.status_mut() = hyper::StatusCode::BAD_REQUEST;
+
+            Ok(resp)
+        }
+    } else {
+        client.request(req).await
+    }
+}
+fn host_addr(uri: &hyper::Uri) -> Option<String> {
+    uri.authority().and_then(|auth| Some(auth.to_string()))
+}
+
+async fn tunnel(mut upgraded: Upgraded, addr: String) -> std::io::Result<()> {
+    // Connect to remote server
+    let mut server = TcpStream::connect(addr).await?;
+
+    // Proxying data
+    let (from_client, from_server) =
+        tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
+
+    // Print message when done
+    println!(
+        "client wrote {} bytes and received {} bytes",
+        from_client, from_server
+    );
+
+    Ok(())
 }
 
 async fn run_proxy(tx: Sender<Arc<Request<Bytes>>>) -> anyhow::Result<()> {
     let addr = ([127, 0, 0, 1], 3002).into();
+    let client = Client::new();
 
     let service = make_service_fn(move |_| {
         let tx = tx.clone();
-        async move { Ok::<_, hyper::Error>(service_fn(move |req| proxy(req, tx.clone()))) }
+        let client = client.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                proxy(req, client.clone(), tx.clone())
+            }))
+        }
     });
 
     let server = Server::bind(&addr).serve(service);
