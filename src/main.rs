@@ -5,13 +5,15 @@ use hyper::{
     Body, Client, Request, Response, Server,
 };
 use std::net::SocketAddr;
+use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() {
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
-        .route("/", get(root));
+        .route("/", get(root))
+        .nest_service("/static", ServeDir::new("static"));
 
     // run our app with hyper
     // `axum::Server` is a re-export of `hyper::Server`

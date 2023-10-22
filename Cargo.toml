@@ -12,3 +12,4 @@ askama_axum = "0.3.0"
 axum = "0.6.20"
 hyper = { version = "0.14.27", features = ["full"] }
 tokio = { version = "1.33.0", features = ["full"] }
+tower-http = { version = "0.4.4", features = ["fs"] }
