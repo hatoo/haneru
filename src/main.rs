@@ -10,13 +10,15 @@ use hyper::{
     client::HttpConnector,
     service::{make_service_fn, service_fn},
     upgrade::Upgraded,
-    Body, Client, Request, Response, Server,
+    Body, Client, Request, Response, Server, Uri,
 };
+use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpStream,
     sync::broadcast::{self, Receiver, Sender},
 };
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower_http::services::ServeDir;
 
 #[tokio::main]
@@ -75,26 +77,19 @@ async fn proxy(
     let req = Request::from_parts(p, Body::from(body));
 
     if req.method() == hyper::Method::CONNECT {
-        if let Some(addr) = host_addr(req.uri()) {
-            tokio::task::spawn(async move {
-                match hyper::upgrade::on(req).await {
-                    Ok(upgraded) => {
-                        if let Err(e) = tunnel(upgraded, addr).await {
-                            eprintln!("server io error: {}", e);
-                        };
-                    }
-                    Err(e) => eprintln!("upgrade error: {}", e),
+        tokio::task::spawn(async move {
+            let uri = req.uri().clone();
+            match hyper::upgrade::on(req).await {
+                Ok(upgraded) => {
+                    if let Err(e) = tunnel(upgraded, uri).await {
+                        eprintln!("server io error: {}", e);
+                    };
                 }
-            });
+                Err(e) => eprintln!("upgrade error: {}", e),
+            }
+        });
 
-            Ok(Response::new(Body::empty()))
-        } else {
-            eprintln!("CONNECT host is not socket addr: {:?}", req.uri());
-            let mut resp = Response::new(Body::from("CONNECT must be to a socket address"));
-            *resp.status_mut() = hyper::StatusCode::BAD_REQUEST;
-
-            Ok(resp)
-        }
+        Ok(Response::new(Body::empty()))
     } else {
         client.request(req).await
     }
@@ -103,19 +98,43 @@ fn host_addr(uri: &hyper::Uri) -> Option<String> {
     uri.authority().and_then(|auth| Some(auth.to_string()))
 }
 
-async fn tunnel(mut upgraded: Upgraded, addr: String) -> std::io::Result<()> {
+async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
+    let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
+    let server_config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![Certificate(cert.serialize_der().unwrap())],
+            PrivateKey(cert.serialize_private_key_der()),
+        )
+        .unwrap();
+
+    let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let mut stream_from_client = tls_acceptor.accept(upgraded).await?;
+
     // Connect to remote server
-    let mut server = TcpStream::connect(addr).await?;
+
+    let mut root_cert_store = rustls::RootCertStore::empty();
+    root_cert_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
+        OwnedTrustAnchor::from_subject_spki_name_constraints(
+            ta.subject,
+            ta.spki,
+            ta.name_constraints,
+        )
+    }));
+
+    let config = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(root_cert_store)
+        .with_no_client_auth(); // i guess this was previously the default?
+    let connector = TlsConnector::from(Arc::new(config));
+    let server = TcpStream::connect(uri.authority().unwrap().to_string()).await?;
+    let mut stream_to_server = connector
+        .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
+        .await?;
 
     // Proxying data
-    let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
-
-    // Print message when done
-    println!(
-        "client wrote {} bytes and received {} bytes",
-        from_client, from_server
-    );
+    let _ = tokio::io::copy_bidirectional(&mut stream_from_client, &mut stream_to_server).await;
 
     Ok(())
 }
