@@ -31,12 +31,10 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
-        /*
         .route(
             "/sse",
             get(|| async move { sse_req(txs.subscribe()).await }),
         )
-        */
         .nest_service("/static", ServeDir::new("static"));
 
     // run our app with hyper
@@ -101,7 +99,7 @@ async fn proxy(
 }
 */
 
-async fn tunnel(upgraded: TcpStream, uri: Uri) -> std::io::Result<()> {
+async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::Result<()> {
     dbg!(uri.host());
     let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
     let server_config = ServerConfig::builder()
@@ -142,7 +140,7 @@ async fn tunnel(upgraded: TcpStream, uri: Uri) -> std::io::Result<()> {
     let mut forward = [0u8; 4 * 1024];
 
     let req = read_req(&mut stream_from_client).await.unwrap();
-    dbg!(String::from_utf8(req.clone()).unwrap());
+    tx.send(req.clone());
 
     stream_to_server.write_all(&req).await.unwrap();
 
@@ -239,7 +237,7 @@ async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Ve
     Ok(buf)
 }
 
-async fn proxy_conn(mut stream: TcpStream) -> anyhow::Result<()> {
+async fn proxy_conn(mut stream: TcpStream, tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
     let buf = read_req(&mut stream).await?;
 
     let fst = parse_path(&buf).unwrap();
@@ -247,9 +245,11 @@ async fn proxy_conn(mut stream: TcpStream) -> anyhow::Result<()> {
     if fst[0].as_str() == "CONNECT" {
         dbg!(&fst);
         stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
-        tunnel(stream, fst[1].parse().unwrap()).await?;
+        tunnel(stream, fst[1].parse().unwrap(), tx).await?;
     } else {
         let uri = Uri::try_from(fst[1].as_str()).unwrap();
+        let buf = replace_path(buf).unwrap();
+        tx.send(buf.clone());
         let mut server = TcpStream::connect(format!(
             "{}:{}",
             uri.authority().unwrap(),
@@ -257,7 +257,6 @@ async fn proxy_conn(mut stream: TcpStream) -> anyhow::Result<()> {
         ))
         .await?;
 
-        let buf = replace_path(buf).unwrap();
         server.write_all(buf.as_ref()).await?;
         server.shutdown().await?;
 
@@ -270,30 +269,36 @@ async fn proxy_conn(mut stream: TcpStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_proxy(tx: Sender<Arc<Request<Bytes>>>) -> anyhow::Result<()> {
+async fn run_proxy(tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
 
     let tcp_listener = TcpListener::bind(addr).await?;
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
+        let tx = tx.clone();
         tokio::spawn(async move {
-            proxy_conn(stream).await.unwrap();
+            proxy_conn(stream, tx).await.unwrap();
         });
     }
 }
 
-/*
-async fn sse_req(
-    rx: Receiver<Arc<Request<Bytes>>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+#[derive(Template)]
+#[template(path = "request.html")]
+struct RequestText<'a> {
+    content: &'a str,
+}
+
+async fn sse_req(rx: Receiver<Vec<u8>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = stream::unfold(rx, |mut rx| async {
         let req = rx.recv().await.unwrap();
 
+        let text = String::from_utf8(req).unwrap();
         Some((
-            Event::default()
-                .event("request")
-                .data(format!("<p>{:?}</p>", req.headers().len())),
+            Event::default().event("request").data(format!(
+                "<textarea>{}</textarea>",
+                html_escape::encode_text(&text).replace("\r\n", "&#x0D;&#x0A;")
+            )),
             rx,
         ))
     })
@@ -301,5 +306,3 @@ async fn sse_req(
 
     Sse::new(stream)
 }
-
-*/
