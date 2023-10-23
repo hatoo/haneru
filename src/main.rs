@@ -101,8 +101,8 @@ async fn proxy(
 }
 */
 
-/*
-async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
+async fn tunnel(upgraded: TcpStream, uri: Uri) -> std::io::Result<()> {
+    dbg!(uri.host());
     let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
@@ -115,6 +115,7 @@ async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
     let mut stream_from_client = tls_acceptor.accept(upgraded).await?;
+    dbg!("tls");
 
     // Connect to remote server
 
@@ -168,9 +169,8 @@ async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
 
     Ok(())
 }
-*/
 
-fn parse_path(buf: &[u8]) -> Option<String> {
+fn parse_path(buf: &[u8]) -> Option<Vec<String>> {
     let mut i = 0;
 
     while *buf.get(i)? != b'\r' {
@@ -179,7 +179,12 @@ fn parse_path(buf: &[u8]) -> Option<String> {
 
     let first_line = std::str::from_utf8(&buf[..i]).ok()?;
 
-    first_line.split_whitespace().nth(1).map(|s| s.to_string())
+    Some(
+        first_line
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect(),
+    )
 }
 
 fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
@@ -221,25 +226,31 @@ async fn read_req(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
 async fn proxy_conn(mut stream: TcpStream) -> anyhow::Result<()> {
     let buf = read_req(&mut stream).await?;
 
-    let path = parse_path(&buf).unwrap();
+    let fst = parse_path(&buf).unwrap();
 
-    let uri = Uri::try_from(path.as_str()).unwrap();
-    let mut server = TcpStream::connect(format!(
-        "{}:{}",
-        uri.authority().unwrap(),
-        uri.port_u16().unwrap_or(80)
-    ))
-    .await?;
+    if fst[0].as_str() == "CONNECT" {
+        dbg!(&fst);
+        stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
+        tunnel(stream, fst[1].parse().unwrap()).await?;
+    } else {
+        let uri = Uri::try_from(fst[1].as_str()).unwrap();
+        let mut server = TcpStream::connect(format!(
+            "{}:{}",
+            uri.authority().unwrap(),
+            uri.port_u16().unwrap_or(80)
+        ))
+        .await?;
 
-    let buf = replace_path(buf).unwrap();
-    server.write_all(buf.as_ref()).await?;
-    server.shutdown().await?;
+        let buf = replace_path(buf).unwrap();
+        server.write_all(buf.as_ref()).await?;
+        server.shutdown().await?;
 
-    let mut buf = Vec::new();
-    server.read_to_end(&mut buf).await?;
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await?;
 
-    stream.write_all(&buf).await?;
-    stream.shutdown().await?;
+        stream.write_all(&buf).await?;
+        stream.shutdown().await?;
+    }
     Ok(())
 }
 
