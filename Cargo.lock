@@ -378,6 +378,7 @@ dependencies = [
  "bytes",
  "futures",
  "http-body",
+ "httparse",
  "hyper",
  "hyper-rustls",
  "rcgen",

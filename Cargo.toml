@@ -13,6 +13,7 @@ axum = "0.6.20"
 bytes = "1.5.0"
 futures = "0.3.28"
 http-body = "0.4.5"
+httparse = "1.8.0"
 hyper = { version = "0.14.27", features = ["full"] }
 hyper-rustls = "0.24.1"
 rcgen = "0.11.3"
