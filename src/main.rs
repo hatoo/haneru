@@ -14,9 +14,9 @@ use hyper::{
     Body, Client, Request, Response, Server, Uri,
 };
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, pin::Pin, sync::Arc};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::broadcast::{self, Receiver, Sender},
 };
@@ -138,16 +138,22 @@ async fn tunnel(upgraded: TcpStream, uri: Uri) -> std::io::Result<()> {
         .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
         .await?;
 
-    let mut buf = BytesMut::new();
-    let mut forward = [0u8; 1024];
+    let mut resp = Vec::new();
+    let mut forward = [0u8; 4 * 1024];
+
+    let req = read_req(&mut stream_from_client).await.unwrap();
+    dbg!(String::from_utf8(req.clone()).unwrap());
+
+    stream_to_server.write_all(&req).await.unwrap();
+
     loop {
         tokio::select! {
-            res = stream_to_server.read_buf(&mut buf) => {
+            res = stream_to_server.read_buf(&mut resp) => {
                 if let Ok(n) = res {
                     if n == 0 {
                         break;
                     }
-                    let _ = stream_from_client.write_all(&buf[buf.len() - n..]).await;
+                    let _ = stream_from_client.write_all(&resp[resp.len() - n..]).await;
                 }else {
                     break;
                 }
@@ -164,8 +170,6 @@ async fn tunnel(upgraded: TcpStream, uri: Uri) -> std::io::Result<()> {
             }
         }
     }
-
-    dbg!(buf);
 
     Ok(())
 }
@@ -211,12 +215,24 @@ fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     Some(ret)
 }
 
-async fn read_req(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::new();
     while {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         req.parse(&buf).unwrap().is_partial()
+    } {
+        stream.read_buf(&mut buf).await?;
+    }
+    Ok(buf)
+}
+
+async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut resp = httparse::Response::new(&mut headers);
+        !resp.parse(&buf).unwrap().is_complete()
     } {
         stream.read_buf(&mut buf).await?;
     }
