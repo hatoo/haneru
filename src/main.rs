@@ -295,10 +295,12 @@ async fn sse_req(rx: Receiver<Vec<u8>>) -> Sse<impl Stream<Item = Result<Event, 
 
         let text = String::from_utf8(req).unwrap();
         Some((
-            Event::default().event("request").data(format!(
-                "<textarea>{}</textarea>",
-                html_escape::encode_text(&text).replace("\r\n", "&#x0D;&#x0A;")
-            )),
+            Event::default().event("request").data(
+                RequestText { content: &text }
+                    .to_string()
+                    .replace("\r", "&#x0D;")
+                    .replace("\n", "&#x0A;"),
+            ),
             rx,
         ))
     })
