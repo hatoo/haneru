@@ -1,13 +1,21 @@
 use askama::Template;
+use askama_axum::IntoResponse;
+use async_cell::sync::AsyncCell;
 use axum::{
+    extract::Path,
     response::sse::{Event, Sse},
     routing::get,
     Router,
 };
+use dashmap::DashMap;
 use futures::{stream, Stream, StreamExt};
 use hyper::Uri;
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{
+    convert::Infallible,
+    net::SocketAddr,
+    sync::{atomic::AtomicUsize, Arc},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -20,10 +28,22 @@ use tower_http::services::ServeDir;
 async fn main() {
     let (tx, _) = broadcast::channel(16);
     let txs = tx.clone();
+
+    let state = Arc::new(Proxy {
+        tx,
+        id_counter: AtomicUsize::new(0),
+        map: DashMap::new(),
+    });
+
+    let state_app = state.clone();
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
+        .route(
+            "/response/:id",
+            get(move |id| response(id, state_app.clone())),
+        )
         .route(
             "/sse",
             get(|| async move { sse_req(txs.subscribe()).await }),
@@ -34,7 +54,7 @@ async fn main() {
     // `axum::Server` is a re-export of `hyper::Server`
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     println!("Listening on http://{}/", addr);
-    tokio::spawn(run_proxy(tx));
+    tokio::spawn(run_proxy(state));
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
@@ -50,7 +70,7 @@ async fn root() -> Index {
     Index
 }
 
-async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::Result<()> {
+async fn tunnel(upgraded: TcpStream, uri: Uri, state: Arc<Proxy>) -> std::io::Result<()> {
     let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
@@ -89,7 +109,7 @@ async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::
     let mut forward = [0u8; 4 * 1024];
 
     let req = read_req(&mut stream_from_client).await.unwrap();
-    let _ = tx.send(req.clone());
+    let cell = state.new_req(req.clone());
 
     stream_to_server.write_all(&req).await.unwrap();
 
@@ -117,6 +137,7 @@ async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::
             }
         }
     }
+    cell.set(resp);
 
     Ok(())
 }
@@ -174,18 +195,18 @@ async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec
     Ok(buf)
 }
 
-async fn proxy(mut stream: TcpStream, tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
+async fn proxy(mut stream: TcpStream, state: Arc<Proxy>) -> anyhow::Result<()> {
     let buf = read_req(&mut stream).await?;
 
     let [method, path, _version] = parse_path(&buf).unwrap();
 
     if method == "CONNECT" {
         stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
-        tunnel(stream, path.parse().unwrap(), tx).await?;
+        tunnel(stream, path.parse().unwrap(), state).await?;
     } else {
         let uri = Uri::try_from(path.as_str()).unwrap();
         let buf = replace_path(buf).unwrap();
-        let _ = tx.send(buf.clone());
+        let cell = state.new_req(buf.clone());
         let mut server = TcpStream::connect(format!(
             "{}:{}",
             uri.authority().unwrap(),
@@ -201,20 +222,40 @@ async fn proxy(mut stream: TcpStream, tx: Sender<Vec<u8>>) -> anyhow::Result<()>
 
         stream.write_all(&buf).await?;
         stream.shutdown().await?;
+        cell.set(buf);
     }
     Ok(())
 }
 
-async fn run_proxy(tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
+struct Proxy {
+    tx: Sender<(usize, Vec<u8>)>,
+    id_counter: AtomicUsize,
+    map: DashMap<usize, Arc<AsyncCell<Vec<u8>>>>,
+}
+
+impl Proxy {
+    fn new_req(&self, req: Vec<u8>) -> Arc<AsyncCell<Vec<u8>>> {
+        let id = self
+            .id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.tx.send((id, req));
+        let cell = Arc::new(AsyncCell::default());
+        self.map.insert(id, cell.clone());
+        cell
+    }
+}
+
+async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
 
     let tcp_listener = TcpListener::bind(addr).await?;
+    println!("HTTP Proxy is Listening on http://{}/", addr);
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
-        let tx = tx.clone();
+        let state = state.clone();
         tokio::spawn(async move {
-            proxy(stream, tx).await.unwrap();
+            proxy(stream, state).await.unwrap();
         });
     }
 }
@@ -222,17 +263,20 @@ async fn run_proxy(tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
 #[derive(Template)]
 #[template(path = "request.html")]
 struct RequestText<'a> {
+    id: usize,
     content: &'a str,
 }
 
-async fn sse_req(rx: Receiver<Vec<u8>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn sse_req(
+    rx: Receiver<(usize, Vec<u8>)>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = stream::unfold(rx, |mut rx| async {
-        let req = rx.recv().await.unwrap();
+        let (id, req) = rx.recv().await.unwrap();
 
         let text = String::from_utf8(req).unwrap();
         Some((
             Event::default().event("request").data(
-                RequestText { content: &text }
+                RequestText { id, content: &text }
                     .to_string()
                     .replace("\r", "&#x0D;")
                     .replace("\n", "&#x0A;"),
@@ -243,4 +287,21 @@ async fn sse_req(rx: Receiver<Vec<u8>>) -> Sse<impl Stream<Item = Result<Event, 
     .map(Ok);
 
     Sse::new(stream)
+}
+
+#[derive(Template)]
+#[template(path = "response.html")]
+struct ResponseText {
+    content: String,
+}
+async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse {
+    let Some(cell) = state.map.get(&id) else {
+        return ResponseText {
+            content: "Not Found".to_string(),
+        };
+    };
+    let resp = cell.get().await;
+    let content = String::from_utf8(resp).unwrap();
+
+    ResponseText { content }
 }
