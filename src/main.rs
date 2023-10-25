@@ -121,7 +121,7 @@ async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::
     Ok(())
 }
 
-fn parse_path(buf: &[u8]) -> Option<Vec<String>> {
+fn parse_path(buf: &[u8]) -> Option<[String; 3]> {
     let mut i = 0;
 
     while *buf.get(i)? != b'\r' {
@@ -130,12 +130,12 @@ fn parse_path(buf: &[u8]) -> Option<Vec<String>> {
 
     let first_line = std::str::from_utf8(&buf[..i]).ok()?;
 
-    Some(
-        first_line
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect(),
-    )
+    first_line
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()
 }
 
 fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
@@ -174,29 +174,16 @@ async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec
     Ok(buf)
 }
 
-async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    while {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut resp = httparse::Response::new(&mut headers);
-        !resp.parse(&buf).unwrap().is_complete()
-    } {
-        stream.read_buf(&mut buf).await?;
-    }
-    Ok(buf)
-}
-
-async fn proxy_conn(mut stream: TcpStream, tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
+async fn proxy(mut stream: TcpStream, tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
     let buf = read_req(&mut stream).await?;
 
-    let fst = parse_path(&buf).unwrap();
+    let [method, path, _version] = parse_path(&buf).unwrap();
 
-    if fst[0].as_str() == "CONNECT" {
-        dbg!(&fst);
+    if method == "CONNECT" {
         stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
-        tunnel(stream, fst[1].parse().unwrap(), tx).await?;
+        tunnel(stream, path.parse().unwrap(), tx).await?;
     } else {
-        let uri = Uri::try_from(fst[1].as_str()).unwrap();
+        let uri = Uri::try_from(path.as_str()).unwrap();
         let buf = replace_path(buf).unwrap();
         let _ = tx.send(buf.clone());
         let mut server = TcpStream::connect(format!(
@@ -227,7 +214,7 @@ async fn run_proxy(tx: Sender<Vec<u8>>) -> anyhow::Result<()> {
         let (stream, _) = tcp_listener.accept().await?;
         let tx = tx.clone();
         tokio::spawn(async move {
-            proxy_conn(stream, tx).await.unwrap();
+            proxy(stream, tx).await.unwrap();
         });
     }
 }
