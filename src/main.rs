@@ -4,19 +4,12 @@ use axum::{
     routing::get,
     Router,
 };
-use bytes::{buf, BytesMut};
 use futures::{stream, Stream, StreamExt};
-use hyper::{
-    body::{to_bytes, Bytes},
-    client::HttpConnector,
-    service::{make_service_fn, service_fn},
-    upgrade::Upgraded,
-    Body, Client, Request, Response, Server, Uri,
-};
+use hyper::Uri;
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
-use std::{convert::Infallible, net::SocketAddr, pin::Pin, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::broadcast::{self, Receiver, Sender},
 };
@@ -56,48 +49,6 @@ struct Index;
 async fn root() -> Index {
     Index
 }
-
-/*
-async fn proxy(
-    req: Request<Body>,
-    client: Client<HttpConnector>,
-    tx: Sender<Arc<Request<Bytes>>>,
-) -> Result<Response<Body>, hyper::Error> {
-    // tx.send(req.clone()).unwrap();
-    let (p, body) = req.into_parts();
-    let body: Bytes = to_bytes(body).await.unwrap();
-
-    {
-        let mut builder = Request::builder()
-            .method(p.method.clone())
-            .uri(p.uri.clone())
-            .version(p.version.clone());
-
-        builder.headers_mut().unwrap().clone_from(&p.headers);
-        let new_req = builder.body(body.clone()).unwrap();
-        let _ = tx.send(Arc::new(new_req));
-    }
-    let req = Request::from_parts(p, Body::from(body));
-
-    if req.method() == hyper::Method::CONNECT {
-        tokio::task::spawn(async move {
-            let uri = req.uri().clone();
-            match hyper::upgrade::on(req).await {
-                Ok(upgraded) => {
-                    if let Err(e) = tunnel(upgraded, uri).await {
-                        eprintln!("server io error: {}", e);
-                    };
-                }
-                Err(e) => eprintln!("upgrade error: {}", e),
-            }
-        });
-
-        Ok(Response::new(Body::empty()))
-    } else {
-        client.request(req).await
-    }
-}
-*/
 
 async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::Result<()> {
     dbg!(uri.host());
