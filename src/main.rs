@@ -7,9 +7,9 @@ use axum::{
     routing::get,
     Router,
 };
-use dashmap::DashMap;
 use futures::{stream, Stream, StreamExt};
 use hyper::Uri;
+use moka::sync::Cache;
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
 use std::{
     convert::Infallible,
@@ -32,7 +32,7 @@ async fn main() {
     let state = Arc::new(Proxy {
         tx,
         id_counter: AtomicUsize::new(0),
-        map: DashMap::new(),
+        map: Cache::new(2048),
     });
 
     let state_app = state.clone();
@@ -230,7 +230,7 @@ async fn proxy(mut stream: TcpStream, state: Arc<Proxy>) -> anyhow::Result<()> {
 struct Proxy {
     tx: Sender<(usize, Vec<u8>)>,
     id_counter: AtomicUsize,
-    map: DashMap<usize, Arc<AsyncCell<Vec<u8>>>>,
+    map: Cache<usize, Arc<AsyncCell<Vec<u8>>>>,
 }
 
 impl Proxy {
