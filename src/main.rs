@@ -1,23 +1,24 @@
 use askama::Template;
+use askama_axum::IntoResponse;
+use async_cell::sync::AsyncCell;
 use axum::{
+    extract::Path,
     response::sse::{Event, Sse},
     routing::get,
     Router,
 };
-use bytes::BytesMut;
+use dashmap::DashMap;
 use futures::{stream, Stream, StreamExt};
-use hyper::{
-    body::{to_bytes, Bytes},
-    client::HttpConnector,
-    service::{make_service_fn, service_fn},
-    upgrade::Upgraded,
-    Body, Client, Request, Response, Server, Uri,
-};
+use hyper::Uri;
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{
+    convert::Infallible,
+    net::SocketAddr,
+    sync::{atomic::AtomicUsize, Arc},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     sync::broadcast::{self, Receiver, Sender},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -27,10 +28,22 @@ use tower_http::services::ServeDir;
 async fn main() {
     let (tx, _) = broadcast::channel(16);
     let txs = tx.clone();
+
+    let state = Arc::new(Proxy {
+        tx,
+        id_counter: AtomicUsize::new(0),
+        map: DashMap::new(),
+    });
+
+    let state_app = state.clone();
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
+        .route(
+            "/response/:id",
+            get(move |id| response(id, state_app.clone())),
+        )
         .route(
             "/sse",
             get(|| async move { sse_req(txs.subscribe()).await }),
@@ -41,7 +54,7 @@ async fn main() {
     // `axum::Server` is a re-export of `hyper::Server`
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     println!("Listening on http://{}/", addr);
-    tokio::spawn(run_proxy(tx));
+    tokio::spawn(run_proxy(state));
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
@@ -57,47 +70,7 @@ async fn root() -> Index {
     Index
 }
 
-async fn proxy(
-    req: Request<Body>,
-    client: Client<HttpConnector>,
-    tx: Sender<Arc<Request<Bytes>>>,
-) -> Result<Response<Body>, hyper::Error> {
-    // tx.send(req.clone()).unwrap();
-    let (p, body) = req.into_parts();
-    let body: Bytes = to_bytes(body).await.unwrap();
-
-    {
-        let mut builder = Request::builder()
-            .method(p.method.clone())
-            .uri(p.uri.clone())
-            .version(p.version.clone());
-
-        builder.headers_mut().unwrap().clone_from(&p.headers);
-        let new_req = builder.body(body.clone()).unwrap();
-        let _ = tx.send(Arc::new(new_req));
-    }
-    let req = Request::from_parts(p, Body::from(body));
-
-    if req.method() == hyper::Method::CONNECT {
-        tokio::task::spawn(async move {
-            let uri = req.uri().clone();
-            match hyper::upgrade::on(req).await {
-                Ok(upgraded) => {
-                    if let Err(e) = tunnel(upgraded, uri).await {
-                        eprintln!("server io error: {}", e);
-                    };
-                }
-                Err(e) => eprintln!("upgrade error: {}", e),
-            }
-        });
-
-        Ok(Response::new(Body::empty()))
-    } else {
-        client.request(req).await
-    }
-}
-
-async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
+async fn tunnel(upgraded: TcpStream, uri: Uri, state: Arc<Proxy>) -> std::io::Result<()> {
     let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
@@ -132,16 +105,22 @@ async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
         .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
         .await?;
 
-    let mut buf = BytesMut::new();
-    let mut forward = [0u8; 1024];
+    let mut resp = Vec::new();
+    let mut forward = [0u8; 4 * 1024];
+
+    let req = read_req(&mut stream_from_client).await.unwrap();
+    let cell = state.new_req(req.clone());
+
+    stream_to_server.write_all(&req).await.unwrap();
+
     loop {
         tokio::select! {
-            res = stream_to_server.read_buf(&mut buf) => {
+            res = stream_to_server.read_buf(&mut resp) => {
                 if let Ok(n) = res {
                     if n == 0 {
                         break;
                     }
-                    let _ = stream_from_client.write_all(&buf[buf.len() - n..]).await;
+                    let _ = stream_from_client.write_all(&resp[resp.len() - n..]).await;
                 }else {
                     break;
                 }
@@ -158,49 +137,171 @@ async fn tunnel(upgraded: Upgraded, uri: Uri) -> std::io::Result<()> {
             }
         }
     }
-
-    dbg!(buf);
+    cell.set(resp);
 
     Ok(())
 }
 
-async fn run_proxy(tx: Sender<Arc<Request<Bytes>>>) -> anyhow::Result<()> {
-    let addr = ([127, 0, 0, 1], 3002).into();
-    let client = Client::new();
+fn parse_path(buf: &[u8]) -> Option<[String; 3]> {
+    let mut i = 0;
 
-    let service = make_service_fn(move |_| {
-        let tx = tx.clone();
-        let client = client.clone();
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                proxy(req, client.clone(), tx.clone())
-            }))
-        }
-    });
+    while *buf.get(i)? != b'\r' {
+        i += 1;
+    }
 
-    let server = Server::bind(&addr).serve(service);
+    let first_line = std::str::from_utf8(&buf[..i]).ok()?;
 
-    println!("Listening on http://{}", addr);
+    first_line
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()
+}
 
-    server.await?;
+fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
+    let mut i = 0;
 
+    while *buf.get(i)? != b'\r' {
+        i += 1;
+    }
+
+    let first_line = std::str::from_utf8(&buf[..i]).ok()?;
+
+    let fst = first_line.split_whitespace().collect::<Vec<_>>();
+    let uri = Uri::try_from(fst[1]).ok()?;
+
+    let mut ret = Vec::new();
+
+    ret.extend(fst[0].as_bytes());
+    ret.push(b' ');
+    ret.extend(uri.path_and_query().unwrap().as_str().as_bytes());
+    ret.push(b' ');
+    ret.extend(fst[2].as_bytes());
+    ret.extend(&buf[i..]);
+
+    Some(ret)
+}
+
+async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        req.parse(&buf).unwrap().is_partial()
+    } {
+        stream.read_buf(&mut buf).await?;
+    }
+    Ok(buf)
+}
+
+async fn proxy(mut stream: TcpStream, state: Arc<Proxy>) -> anyhow::Result<()> {
+    let buf = read_req(&mut stream).await?;
+
+    let [method, path, _version] = parse_path(&buf).unwrap();
+
+    if method == "CONNECT" {
+        stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
+        tunnel(stream, path.parse().unwrap(), state).await?;
+    } else {
+        let uri = Uri::try_from(path.as_str()).unwrap();
+        let buf = replace_path(buf).unwrap();
+        let cell = state.new_req(buf.clone());
+        let mut server = TcpStream::connect(format!(
+            "{}:{}",
+            uri.authority().unwrap(),
+            uri.port_u16().unwrap_or(80)
+        ))
+        .await?;
+
+        server.write_all(buf.as_ref()).await?;
+        server.shutdown().await?;
+
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await?;
+
+        stream.write_all(&buf).await?;
+        stream.shutdown().await?;
+        cell.set(buf);
+    }
     Ok(())
+}
+
+struct Proxy {
+    tx: Sender<(usize, Vec<u8>)>,
+    id_counter: AtomicUsize,
+    map: DashMap<usize, Arc<AsyncCell<Vec<u8>>>>,
+}
+
+impl Proxy {
+    fn new_req(&self, req: Vec<u8>) -> Arc<AsyncCell<Vec<u8>>> {
+        let id = self
+            .id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.tx.send((id, req));
+        let cell = Arc::new(AsyncCell::default());
+        self.map.insert(id, cell.clone());
+        cell
+    }
+}
+
+async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
+
+    let tcp_listener = TcpListener::bind(addr).await?;
+    println!("HTTP Proxy is Listening on http://{}/", addr);
+
+    loop {
+        let (stream, _) = tcp_listener.accept().await?;
+        let state = state.clone();
+        tokio::spawn(async move {
+            proxy(stream, state).await.unwrap();
+        });
+    }
+}
+
+#[derive(Template)]
+#[template(path = "request.html")]
+struct RequestText<'a> {
+    id: usize,
+    content: &'a str,
 }
 
 async fn sse_req(
-    rx: Receiver<Arc<Request<Bytes>>>,
+    rx: Receiver<(usize, Vec<u8>)>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = stream::unfold(rx, |mut rx| async {
-        let req = rx.recv().await.unwrap();
+        let (id, req) = rx.recv().await.unwrap();
 
+        let text = String::from_utf8(req).unwrap();
         Some((
-            Event::default()
-                .event("request")
-                .data(format!("<p>{:?}</p>", req.headers().len())),
+            Event::default().event("request").data(
+                RequestText { id, content: &text }
+                    .to_string()
+                    .replace("\r", "&#x0D;")
+                    .replace("\n", "&#x0A;"),
+            ),
             rx,
         ))
     })
     .map(Ok);
 
     Sse::new(stream)
+}
+
+#[derive(Template)]
+#[template(path = "response.html")]
+struct ResponseText {
+    content: String,
+}
+async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse {
+    let Some(cell) = state.map.get(&id) else {
+        return ResponseText {
+            content: "Not Found".to_string(),
+        };
+    };
+    let resp = cell.get().await;
+    let content = String::from_utf8(resp).unwrap();
+
+    ResponseText { content }
 }
