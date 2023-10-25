@@ -51,7 +51,6 @@ async fn root() -> Index {
 }
 
 async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::Result<()> {
-    dbg!(uri.host());
     let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
@@ -64,7 +63,6 @@ async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
     let mut stream_from_client = tls_acceptor.accept(upgraded).await?;
-    dbg!("tls");
 
     // Connect to remote server
 
@@ -91,7 +89,7 @@ async fn tunnel(upgraded: TcpStream, uri: Uri, tx: Sender<Vec<u8>>) -> std::io::
     let mut forward = [0u8; 4 * 1024];
 
     let req = read_req(&mut stream_from_client).await.unwrap();
-    tx.send(req.clone());
+    let _ = tx.send(req.clone());
 
     stream_to_server.write_all(&req).await.unwrap();
 
@@ -200,7 +198,7 @@ async fn proxy_conn(mut stream: TcpStream, tx: Sender<Vec<u8>>) -> anyhow::Resul
     } else {
         let uri = Uri::try_from(fst[1].as_str()).unwrap();
         let buf = replace_path(buf).unwrap();
-        tx.send(buf.clone());
+        let _ = tx.send(buf.clone());
         let mut server = TcpStream::connect(format!(
             "{}:{}",
             uri.authority().unwrap(),
