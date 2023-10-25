@@ -209,20 +209,40 @@ async fn proxy(mut stream: TcpStream, state: Arc<Proxy>) -> anyhow::Result<()> {
         let cell = state.new_req(buf.clone());
         let mut server = TcpStream::connect(format!(
             "{}:{}",
-            uri.authority().unwrap(),
+            uri.host().unwrap(),
             uri.port_u16().unwrap_or(80)
         ))
-        .await?;
+        .await
+        .unwrap();
 
         server.write_all(buf.as_ref()).await?;
-        server.shutdown().await?;
-
-        let mut buf = Vec::new();
-        server.read_to_end(&mut buf).await?;
-
-        stream.write_all(&buf).await?;
-        stream.shutdown().await?;
-        cell.set(buf);
+        let mut resp = Vec::new();
+        let mut forward = [0u8; 4 * 1024];
+        loop {
+            tokio::select! {
+                res = server.read_buf(&mut resp) => {
+                    if let Ok(n) = res {
+                        if n == 0 {
+                            break;
+                        }
+                        let _ = stream.write_all(&resp[resp.len() - n..]).await;
+                    } else {
+                        break;
+                    }
+                }
+                res = stream.read(&mut forward) => {
+                    if let Ok(n) = res {
+                        if n == 0 {
+                            break;
+                        }
+                        let _ = server.write_all(&forward[..n]).await;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        cell.set(resp);
     }
     Ok(())
 }
