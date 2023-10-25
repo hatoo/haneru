@@ -105,38 +105,13 @@ async fn tunnel(upgraded: TcpStream, uri: Uri, state: Arc<Proxy>) -> std::io::Re
         .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
         .await?;
 
-    let mut resp = Vec::new();
-    let mut forward = [0u8; 4 * 1024];
-
     let req = read_req(&mut stream_from_client).await.unwrap();
     let cell = state.new_req(req.clone());
 
     stream_to_server.write_all(&req).await.unwrap();
 
-    loop {
-        tokio::select! {
-            res = stream_to_server.read_buf(&mut resp) => {
-                if let Ok(n) = res {
-                    if n == 0 {
-                        break;
-                    }
-                    let _ = stream_from_client.write_all(&resp[resp.len() - n..]).await;
-                }else {
-                    break;
-                }
-            }
-            res = stream_from_client.read(&mut forward) => {
-                if let Ok(n) = res {
-                    if n == 0 {
-                        break;
-                    }
-                    let _ = stream_to_server.write_all(&forward[..n]).await;
-                }else {
-                    break;
-                }
-            }
-        }
-    }
+    let resp = sniff(stream_from_client, stream_to_server).await;
+
     cell.set(resp);
 
     Ok(())
@@ -216,35 +191,46 @@ async fn proxy(mut stream: TcpStream, state: Arc<Proxy>) -> anyhow::Result<()> {
         .unwrap();
 
         server.write_all(buf.as_ref()).await?;
-        let mut resp = Vec::new();
-        let mut forward = [0u8; 4 * 1024];
-        loop {
-            tokio::select! {
-                res = server.read_buf(&mut resp) => {
-                    if let Ok(n) = res {
-                        if n == 0 {
-                            break;
-                        }
-                        let _ = stream.write_all(&resp[resp.len() - n..]).await;
-                    } else {
-                        break;
-                    }
-                }
-                res = stream.read(&mut forward) => {
-                    if let Ok(n) = res {
-                        if n == 0 {
-                            break;
-                        }
-                        let _ = server.write_all(&forward[..n]).await;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
+        let resp = sniff(stream, server).await;
         cell.set(resp);
     }
     Ok(())
+}
+
+async fn sniff<
+    S1: AsyncReadExt + AsyncWriteExt + Unpin,
+    S2: AsyncReadExt + AsyncWriteExt + Unpin,
+>(
+    mut client: S1,
+    mut server: S2,
+) -> Vec<u8> {
+    let mut resp = Vec::new();
+    let mut forward = [0u8; 4 * 1024];
+    loop {
+        tokio::select! {
+            res = server.read_buf(&mut resp) => {
+                if let Ok(n) = res {
+                    if n == 0 {
+                        break;
+                    }
+                    let _ = client.write_all(&resp[resp.len() - n..]).await;
+                } else {
+                    break;
+                }
+            }
+            res = client.read(&mut forward) => {
+                if let Ok(n) = res {
+                    if n == 0 {
+                        break;
+                    }
+                    let _ = server.write_all(&forward[..n]).await;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    resp
 }
 
 struct Proxy {
