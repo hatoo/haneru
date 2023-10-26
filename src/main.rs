@@ -8,8 +8,10 @@ use axum::{
     Router,
 };
 use futures::{stream, Stream, StreamExt};
-use hyper::Uri;
+use hyper::{header, Uri};
 use moka::sync::Cache;
+use once_cell::sync::Lazy;
+use rcgen::{CertificateParams, KeyPair, PublicKey};
 use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
 use std::{
     convert::Infallible,
@@ -23,6 +25,9 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower_http::services::ServeDir;
+
+const ROOT_CERT: &str = include_str!("../certs/ca.crt");
+const PRIVATE_KEY: &str = include_str!("../certs/ca.key");
 
 #[tokio::main]
 async fn main() {
@@ -40,6 +45,7 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
+        .route("/cert", get(cert))
         .route(
             "/response/:id",
             get(move |id| response(id, state_app.clone())),
@@ -61,6 +67,15 @@ async fn main() {
         .unwrap();
 }
 
+async fn cert() -> impl IntoResponse {
+    let headers = axum::http::HeaderMap::from_iter([(
+        header::CONTENT_DISPOSITION,
+        "attachment; filename=\"ca.crt\"".try_into().unwrap(),
+    )]);
+
+    (headers, ROOT_CERT)
+}
+
 #[derive(Template)]
 #[template(path = "index.html")]
 struct Index;
@@ -71,12 +86,28 @@ async fn root() -> Index {
 }
 
 async fn tunnel(upgraded: TcpStream, uri: Uri, state: Arc<Proxy>) -> std::io::Result<()> {
-    let cert = rcgen::generate_simple_self_signed(vec![uri.host().unwrap().to_string()]).unwrap();
+    let mut cert_params = CertificateParams::new(vec![uri.host().unwrap().to_string()]);
+    cert_params.key_pair = Some(KeyPair::from_pem(PRIVATE_KEY).unwrap());
+
+    let cert = rcgen::Certificate::from_params(cert_params).unwrap();
+
+    let root = Certificate(
+        rustls_pemfile::certs(&mut ROOT_CERT.as_bytes())
+            .unwrap()
+            .remove(0),
+    );
+    /*
+    let private_key = PrivateKey(
+        rustls_pemfile::pkcs8_private_keys(&mut PRIVATE_KEY.as_bytes())
+            .unwrap()
+            .remove(0),
+    );
+    */
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(
-            vec![Certificate(cert.serialize_der().unwrap())],
+            vec![root, Certificate(cert.serialize_der().unwrap())],
             PrivateKey(cert.serialize_private_key_der()),
         )
         .unwrap();
