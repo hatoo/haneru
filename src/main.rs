@@ -250,7 +250,9 @@ async fn sniff<
                     if n == 0 {
                         break;
                     }
-                    let _ = client.write_all(&resp[resp.len() - n..]).await;
+                    if client.write_all(&resp[resp.len() - n..]).await.is_err() {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -260,7 +262,9 @@ async fn sniff<
                     if n == 0 {
                         break;
                     }
-                    let _ = server.write_all(&forward[..n]).await;
+                    if server.write_all(&forward[..n]).await.is_err() {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -344,7 +348,7 @@ async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse
         };
     };
     let resp = cell.get().await;
-    let content = String::from_utf8(resp).unwrap();
+    let content = String::from_utf8(resp).unwrap_or_else(|_| "Not Found".to_string());
 
     ResponseText { content }
 }
