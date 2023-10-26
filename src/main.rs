@@ -10,9 +10,8 @@ use axum::{
 use futures::{stream, Stream, StreamExt};
 use hyper::{header, Uri};
 use moka::sync::Cache;
-use once_cell::sync::Lazy;
-use rcgen::{CertificateParams, KeyPair};
-use rustls::{OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
+use rcgen::CertificateParams;
+use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
 use std::{
     convert::Infallible,
     net::SocketAddr,
@@ -26,22 +25,26 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower_http::services::ServeDir;
 
-const ROOT_CERT: Lazy<rcgen::Certificate> = Lazy::new(|| {
-    let mut param = rcgen::CertificateParams::default();
+async fn root_cert() -> &'static rcgen::Certificate {
+    static ONCE: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
 
-    param.distinguished_name = rcgen::DistinguishedName::new();
-    param
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "haneru");
-    param.key_usages = vec![
-        rcgen::KeyUsagePurpose::KeyCertSign,
-        rcgen::KeyUsagePurpose::CrlSign,
-    ];
-    param.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    param.use_authority_key_identifier_extension = true;
+    ONCE.get_or_init(|| async {
+        let mut param = rcgen::CertificateParams::default();
 
-    rcgen::Certificate::from_params(param).unwrap()
-});
+        param.distinguished_name = rcgen::DistinguishedName::new();
+        param.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::Utf8String("<HANERU CA>".to_string()),
+        );
+        param.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        param.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        rcgen::Certificate::from_params(param).unwrap()
+    })
+    .await
+}
 
 fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
     let mut cert_params = CertificateParams::new(hosts);
@@ -103,7 +106,7 @@ async fn cert() -> impl IntoResponse {
         "attachment; filename=\"ca.crt\"".try_into().unwrap(),
     )]);
 
-    (headers, ROOT_CERT.serialize_pem().unwrap())
+    (headers, root_cert().await.serialize_pem().unwrap())
 }
 
 #[derive(Template)]
@@ -121,7 +124,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     state: Arc<Proxy>,
 ) -> std::io::Result<()> {
     let cert = make_cert(vec![uri.host().unwrap().to_string()]);
-    let signed = cert.serialize_der_with_signer(&ROOT_CERT).unwrap();
+    let signed = cert.serialize_der_with_signer(root_cert().await).unwrap();
     let private_key = cert.get_key_pair().serialize_der();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()

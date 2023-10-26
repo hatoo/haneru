@@ -568,7 +568,6 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "moka",
- "once_cell",
  "rcgen",
  "rustls",
  "rustls-pemfile",
