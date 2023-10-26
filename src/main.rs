@@ -11,8 +11,8 @@ use futures::{stream, Stream, StreamExt};
 use hyper::{header, Uri};
 use moka::sync::Cache;
 use once_cell::sync::Lazy;
-use rcgen::{CertificateParams, KeyPair, PublicKey};
-use rustls::{Certificate, OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
+use rcgen::{CertificateParams, KeyPair};
+use rustls::{OwnedTrustAnchor, PrivateKey, ServerConfig, ServerName};
 use std::{
     convert::Infallible,
     net::SocketAddr,
