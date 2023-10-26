@@ -43,7 +43,7 @@ const ROOT_CERT: Lazy<rcgen::Certificate> = Lazy::new(|| {
     rcgen::Certificate::from_params(param).unwrap()
 });
 
-fn make_cert(hosts: Vec<String>) -> (rustls::Certificate, PrivateKey) {
+fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
     let mut cert_params = CertificateParams::new(hosts);
     cert_params
         .key_usages
@@ -56,11 +56,7 @@ fn make_cert(hosts: Vec<String>) -> (rustls::Certificate, PrivateKey) {
         .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
     let cert = rcgen::Certificate::from_params(cert_params).unwrap();
 
-    eprintln!("{}", cert.serialize_pem_with_signer(&ROOT_CERT).unwrap());
-    (
-        rustls::Certificate(cert.serialize_der_with_signer(&ROOT_CERT).unwrap()),
-        PrivateKey(cert.serialize_private_key_der()),
-    )
+    cert
 }
 
 #[tokio::main]
@@ -142,11 +138,16 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     uri: Uri,
     state: Arc<Proxy>,
 ) -> std::io::Result<()> {
-    let (cert, private_key) = make_cert(vec![uri.host().unwrap().to_string()]);
+    let cert = make_cert(vec![uri.host().unwrap().to_string()]);
+    let signed = cert.serialize_der_with_signer(&ROOT_CERT).unwrap();
+    let private_key = cert.serialize_private_key_der();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(vec![cert], private_key)
+        .with_single_cert(
+            vec![rustls::Certificate(signed)],
+            rustls::PrivateKey(private_key),
+        )
         .unwrap();
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
