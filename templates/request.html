@@ -1,3 +1,4 @@
 {% let rows = content.lines().count() %}
+<p>Request {{id}}</p>
 <textarea rows="{{rows}}">{{content}}</textarea>
 <div hx-get="/response/{{id}}" hx-trigger="load" hx-swap="outerHTML"></div>

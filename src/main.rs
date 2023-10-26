@@ -253,6 +253,7 @@ async fn sniff<
                     if client.write_all(&resp[resp.len() - n..]).await.is_err() {
                         break;
                     }
+                    client.flush().await.unwrap();
                 } else {
                     break;
                 }
@@ -265,6 +266,7 @@ async fn sniff<
                     if server.write_all(&forward[..n]).await.is_err() {
                         break;
                     }
+                    server.flush().await.unwrap();
                 } else {
                     break;
                 }
