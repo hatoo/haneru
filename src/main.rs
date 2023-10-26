@@ -159,6 +159,23 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
         .await?;
 
+    loop {
+        let (req, has_upgrade) = read_req(&mut stream_from_client).await.unwrap();
+        let cell = state.new_req(req.clone());
+
+        if has_upgrade {
+            let resp = sniff(stream_from_client, stream_to_server).await;
+            cell.set(resp);
+            break;
+        } else {
+            stream_to_server.write_all(&req).await.unwrap();
+            let resp = read_resp(&mut stream_to_server).await.unwrap();
+            stream_from_client.write_all(resp.as_ref()).await?;
+            cell.set(resp);
+        }
+    }
+
+    /*
     let (req, has_upgrade) = read_req(&mut stream_from_client).await.unwrap();
     let cell = state.new_req(req.clone());
 
@@ -174,6 +191,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     };
 
     cell.set(resp);
+    */
 
     Ok(())
 }
@@ -332,16 +350,30 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
         server.write_all(buf.as_ref()).await?;
 
-        let resp = if has_upgrade {
-            sniff(stream, server).await
+        if has_upgrade {
+            let resp = sniff(stream, server).await;
+            cell.set(resp);
         } else {
             let resp = read_resp(&mut server).await.unwrap(); // sniff(stream, server).await;
             stream.write_all(resp.as_ref()).await?;
-            stream.shutdown().await.unwrap();
-            server.shutdown().await.unwrap();
-            resp
+            cell.set(resp);
+
+            loop {
+                let (req, has_upgrade) = read_req(&mut stream).await.unwrap();
+                let cell = state.new_req(req.clone());
+
+                if has_upgrade {
+                    let resp = sniff(stream, server).await;
+                    cell.set(resp);
+                    break;
+                } else {
+                    server.write_all(&req).await.unwrap();
+                    let resp = read_resp(&mut server).await.unwrap();
+                    stream.write_all(resp.as_ref()).await?;
+                    cell.set(resp);
+                }
+            }
         };
-        cell.set(resp);
     }
     Ok(())
 }
