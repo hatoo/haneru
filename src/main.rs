@@ -61,24 +61,6 @@ fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
 
 #[tokio::main]
 async fn main() {
-    let param = rcgen::CertificateParams::from_ca_cert_pem(
-        include_str!("../certs/ca.crt"),
-        KeyPair::from_pem(include_str!("../certs/ca.key")).unwrap(),
-    )
-    .unwrap();
-
-    dbg!(param.alg);
-    dbg!(param.crl_distribution_points);
-    dbg!(param.custom_extensions);
-    dbg!(param.distinguished_name);
-    dbg!(param.extended_key_usages);
-    dbg!(param.is_ca);
-    dbg!(param.key_identifier_method);
-    dbg!(param.key_usages);
-    dbg!(param.name_constraints);
-    dbg!(param.subject_alt_names);
-    dbg!(param.use_authority_key_identifier_extension);
-
     let (tx, _) = broadcast::channel(16);
     let txs = tx.clone();
 
@@ -140,7 +122,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 ) -> std::io::Result<()> {
     let cert = make_cert(vec![uri.host().unwrap().to_string()]);
     let signed = cert.serialize_der_with_signer(&ROOT_CERT).unwrap();
-    let private_key = cert.serialize_private_key_der();
+    let private_key = cert.get_key_pair().serialize_der();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
@@ -151,7 +133,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .unwrap();
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-    let mut stream_from_client = tls_acceptor.accept(upgraded).await?;
+    let mut stream_from_client = tls_acceptor.accept(upgraded).await.unwrap();
 
     // Connect to remote server
 
@@ -250,7 +232,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     if method == "CONNECT" {
         stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
         stream.flush().await?;
-        tunnel(stream, path.parse().unwrap(), state).await?;
+        tunnel(stream, path.parse().unwrap(), state).await.unwrap();
     } else {
         let uri = Uri::try_from(path.as_str()).unwrap();
         let buf = replace_path(buf).unwrap();
