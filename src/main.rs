@@ -26,8 +26,26 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower_http::services::ServeDir;
 
-const ROOT_CERT: &str = include_str!("../certs/ca.crt");
-const PRIVATE_KEY: &str = include_str!("../certs/ca.key");
+const ROOT_CERT: Lazy<rcgen::Certificate> = Lazy::new(|| {
+    rcgen::Certificate::from_params(
+        rcgen::CertificateParams::from_ca_cert_pem(
+            include_str!("../certs/ca.crt"),
+            KeyPair::from_pem(include_str!("../certs/ca.key")).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+});
+
+fn make_cert(hosts: Vec<String>) -> (rustls::Certificate, PrivateKey) {
+    let cert_params = CertificateParams::new(hosts);
+    let cert = rcgen::Certificate::from_params(cert_params).unwrap();
+
+    (
+        rustls::Certificate(cert.serialize_der_with_signer(&ROOT_CERT).unwrap()),
+        PrivateKey(cert.serialize_private_key_der()),
+    )
+}
 
 #[tokio::main]
 async fn main() {
@@ -73,7 +91,7 @@ async fn cert() -> impl IntoResponse {
         "attachment; filename=\"ca.crt\"".try_into().unwrap(),
     )]);
 
-    (headers, ROOT_CERT)
+    (headers, ROOT_CERT.serialize_pem().unwrap())
 }
 
 #[derive(Template)]
@@ -85,31 +103,16 @@ async fn root() -> Index {
     Index
 }
 
-async fn tunnel(upgraded: TcpStream, uri: Uri, state: Arc<Proxy>) -> std::io::Result<()> {
-    let mut cert_params = CertificateParams::new(vec![uri.host().unwrap().to_string()]);
-    cert_params.key_pair = Some(KeyPair::from_pem(PRIVATE_KEY).unwrap());
-
-    let cert = rcgen::Certificate::from_params(cert_params).unwrap();
-
-    let root = Certificate(
-        rustls_pemfile::certs(&mut ROOT_CERT.as_bytes())
-            .unwrap()
-            .remove(0),
-    );
-    /*
-    let private_key = PrivateKey(
-        rustls_pemfile::pkcs8_private_keys(&mut PRIVATE_KEY.as_bytes())
-            .unwrap()
-            .remove(0),
-    );
-    */
+async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    upgraded: S,
+    uri: Uri,
+    state: Arc<Proxy>,
+) -> std::io::Result<()> {
+    let (cert, private_key) = make_cert(vec![uri.host().unwrap().to_string()]);
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(
-            vec![root, Certificate(cert.serialize_der().unwrap())],
-            PrivateKey(cert.serialize_private_key_der()),
-        )
+        .with_single_cert(vec![cert], private_key)
         .unwrap();
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
@@ -201,7 +204,10 @@ async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec
     Ok(buf)
 }
 
-async fn proxy(mut stream: TcpStream, state: Arc<Proxy>) -> anyhow::Result<()> {
+async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    mut stream: S,
+    state: Arc<Proxy>,
+) -> anyhow::Result<()> {
     let buf = read_req(&mut stream).await?;
 
     let [method, path, _version] = parse_path(&buf).unwrap();
