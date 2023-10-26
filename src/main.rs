@@ -27,20 +27,36 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower_http::services::ServeDir;
 
 const ROOT_CERT: Lazy<rcgen::Certificate> = Lazy::new(|| {
-    rcgen::Certificate::from_params(
-        rcgen::CertificateParams::from_ca_cert_pem(
-            include_str!("../certs/ca.crt"),
-            KeyPair::from_pem(include_str!("../certs/ca.key")).unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap()
+    let mut param = rcgen::CertificateParams::default();
+
+    param.distinguished_name = rcgen::DistinguishedName::new();
+    param
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "haneru");
+    param.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    param.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    param.use_authority_key_identifier_extension = true;
+
+    rcgen::Certificate::from_params(param).unwrap()
 });
 
 fn make_cert(hosts: Vec<String>) -> (rustls::Certificate, PrivateKey) {
-    let cert_params = CertificateParams::new(hosts);
+    let mut cert_params = CertificateParams::new(hosts);
+    cert_params
+        .key_usages
+        .push(rcgen::KeyUsagePurpose::DigitalSignature);
+    cert_params
+        .extended_key_usages
+        .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+    cert_params
+        .extended_key_usages
+        .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
     let cert = rcgen::Certificate::from_params(cert_params).unwrap();
 
+    eprintln!("{}", cert.serialize_pem_with_signer(&ROOT_CERT).unwrap());
     (
         rustls::Certificate(cert.serialize_der_with_signer(&ROOT_CERT).unwrap()),
         PrivateKey(cert.serialize_private_key_der()),
@@ -49,6 +65,24 @@ fn make_cert(hosts: Vec<String>) -> (rustls::Certificate, PrivateKey) {
 
 #[tokio::main]
 async fn main() {
+    let param = rcgen::CertificateParams::from_ca_cert_pem(
+        include_str!("../certs/ca.crt"),
+        KeyPair::from_pem(include_str!("../certs/ca.key")).unwrap(),
+    )
+    .unwrap();
+
+    dbg!(param.alg);
+    dbg!(param.crl_distribution_points);
+    dbg!(param.custom_extensions);
+    dbg!(param.distinguished_name);
+    dbg!(param.extended_key_usages);
+    dbg!(param.is_ca);
+    dbg!(param.key_identifier_method);
+    dbg!(param.key_usages);
+    dbg!(param.name_constraints);
+    dbg!(param.subject_alt_names);
+    dbg!(param.use_authority_key_identifier_extension);
+
     let (tx, _) = broadcast::channel(16);
     let txs = tx.clone();
 
@@ -214,6 +248,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
     if method == "CONNECT" {
         stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
+        stream.flush().await?;
         tunnel(stream, path.parse().unwrap(), state).await?;
     } else {
         let uri = Uri::try_from(path.as_str()).unwrap();
