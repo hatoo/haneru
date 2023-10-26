@@ -159,12 +159,19 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
         .await?;
 
-    let req = read_req(&mut stream_from_client).await.unwrap();
+    let (req, has_upgrade) = read_req(&mut stream_from_client).await.unwrap();
     let cell = state.new_req(req.clone());
 
     stream_to_server.write_all(&req).await.unwrap();
-
-    let resp = sniff(stream_from_client, stream_to_server).await;
+    let resp = if has_upgrade {
+        sniff(stream_from_client, stream_to_server).await
+    } else {
+        let resp = read_resp(&mut stream_to_server).await.unwrap(); // sniff(stream, server).await;
+        stream_from_client.write_all(resp.as_ref()).await?;
+        stream_from_client.shutdown().await.unwrap();
+        stream_to_server.shutdown().await.unwrap();
+        resp
+    };
 
     cell.set(resp);
 
@@ -212,12 +219,88 @@ fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     Some(ret)
 }
 
-async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
+async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<(Vec<u8>, bool)> {
     let mut buf = Vec::new();
     while {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         req.parse(&buf).unwrap().is_partial()
+    } {
+        stream.read_buf(&mut buf).await?;
+    }
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
+    req.parse(&buf).unwrap();
+    let has_upgrade = headers.iter().any(|h| {
+        h.name.to_lowercase().as_str() == "connection"
+            && String::from_utf8(h.value.to_vec())
+                .unwrap()
+                .to_lowercase()
+                .as_str()
+                == "upgrade"
+    });
+    Ok((buf, has_upgrade))
+}
+
+async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut resp = httparse::Response::new(&mut headers);
+
+        match resp.parse(&buf).unwrap() {
+            httparse::Status::Complete(n) => {
+                let mut cont = false;
+                for header in headers {
+                    match header.name.to_lowercase().as_str() {
+                        "content-length" => {
+                            let len = String::from_utf8(header.value.to_vec())
+                                .unwrap()
+                                .parse::<usize>()
+                                .unwrap();
+                            cont = buf.len() - n < len;
+                            break;
+                        }
+                        "transfer-encoding" => {
+                            if String::from_utf8(header.value.to_vec())
+                                .unwrap()
+                                .to_lowercase()
+                                .as_str()
+                                == "chunked"
+                            {
+                                let mut body = &buf[n..];
+                                loop {
+                                    let httparse::Status::Complete((offset, len)) =
+                                        httparse::parse_chunk_size(body).unwrap()
+                                    else {
+                                        cont = true;
+                                        break;
+                                    };
+
+                                    let next = offset + len as usize + 2;
+                                    if body.len() < next {
+                                        cont = true;
+                                        break;
+                                    }
+                                    if len == 0 {
+                                        cont = false;
+                                        break;
+                                    }
+                                    body = &body[next..];
+                                }
+                                break;
+                            }
+                        }
+                        _ if header == httparse::EMPTY_HEADER => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                cont
+            }
+            httparse::Status::Partial => true,
+        }
     } {
         stream.read_buf(&mut buf).await?;
     }
@@ -228,13 +311,12 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     mut stream: S,
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
-    let buf = read_req(&mut stream).await?;
+    let (buf, has_upgrade) = read_req(&mut stream).await?;
 
     let [method, path, _version] = parse_path(&buf).unwrap();
 
     if method == "CONNECT" {
-        stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n").await?;
-        stream.flush().await?;
+        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
         tunnel(stream, path.parse().unwrap(), state).await.unwrap();
     } else {
         let uri = Uri::try_from(path.as_str()).unwrap();
@@ -249,7 +331,16 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .unwrap();
 
         server.write_all(buf.as_ref()).await?;
-        let resp = sniff(stream, server).await;
+
+        let resp = if has_upgrade {
+            sniff(stream, server).await
+        } else {
+            let resp = read_resp(&mut server).await.unwrap(); // sniff(stream, server).await;
+            stream.write_all(resp.as_ref()).await?;
+            stream.shutdown().await.unwrap();
+            server.shutdown().await.unwrap();
+            resp
+        };
         cell.set(resp);
     }
     Ok(())
@@ -371,7 +462,7 @@ async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse
         };
     };
     let resp = cell.get().await;
-    let content = String::from_utf8(resp).unwrap_or_else(|_| "Not Found".to_string());
+    let content = String::from_utf8(resp).unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
 
     ResponseText { content }
 }
