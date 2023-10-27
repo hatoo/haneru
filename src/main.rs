@@ -10,7 +10,7 @@ use axum::{
 };
 use futures::{stream, Stream, StreamExt};
 use http::{read_req, read_resp};
-use hyper::{client::conn, header, Uri};
+use hyper::{header, Uri};
 use moka::sync::Cache;
 use rcgen::CertificateParams;
 use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
