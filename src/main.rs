@@ -9,7 +9,7 @@ use axum::{
     Router,
 };
 use futures::{stream, Stream, StreamExt};
-use httparse::Status;
+use http::{read_req, read_resp};
 use hyper::{header, Uri};
 use moka::sync::Cache;
 use rcgen::CertificateParams;
@@ -26,6 +26,8 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower_http::services::ServeDir;
+
+mod http;
 
 async fn root_cert() -> &'static rcgen::Certificate {
     static ONCE: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
@@ -124,9 +126,9 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     upgraded: S,
     uri: Uri,
     state: Arc<Proxy>,
-) -> std::io::Result<()> {
+) -> anyhow::Result<()> {
     let cert = make_cert(vec![uri.host().unwrap().to_string()]);
-    let signed = cert.serialize_der_with_signer(root_cert().await).unwrap();
+    let signed = cert.serialize_der_with_signer(root_cert().await)?;
     let private_key = cert.get_key_pair().serialize_der();
     let server_config = ServerConfig::builder()
         .with_safe_defaults()
@@ -134,11 +136,10 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .with_single_cert(
             vec![rustls::Certificate(signed)],
             rustls::PrivateKey(private_key),
-        )
-        .unwrap();
+        )?;
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-    let mut stream_from_client = tls_acceptor.accept(upgraded).await.unwrap();
+    let mut stream_from_client = tls_acceptor.accept(upgraded).await?;
 
     // Connect to remote server
 
@@ -156,13 +157,16 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .with_root_certificates(root_cert_store)
         .with_no_client_auth(); // i guess this was previously the default?
     let connector = TlsConnector::from(Arc::new(config));
-    let server = TcpStream::connect(uri.authority().unwrap().to_string()).await?;
+    let server = TcpStream::connect(uri.authority().context("no authority")?.to_string()).await?;
     let mut stream_to_server = connector
-        .connect(ServerName::try_from(uri.host().unwrap()).unwrap(), server)
+        .connect(
+            ServerName::try_from(uri.host().context("no host")?)?,
+            server,
+        )
         .await?;
 
     loop {
-        let (req, has_upgrade) = read_req(&mut stream_from_client).await.unwrap();
+        let (req, has_upgrade) = read_req(&mut stream_from_client).await?;
         let cell = state.new_req(req.clone());
 
         if has_upgrade {
@@ -170,30 +174,12 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             cell.set(resp);
             break;
         } else {
-            stream_to_server.write_all(&req).await.unwrap();
-            let resp = read_resp(&mut stream_to_server).await.unwrap();
+            stream_to_server.write_all(&req).await?;
+            let resp = read_resp(&mut stream_to_server).await?;
             stream_from_client.write_all(resp.as_ref()).await?;
             cell.set(resp);
         }
     }
-
-    /*
-    let (req, has_upgrade) = read_req(&mut stream_from_client).await.unwrap();
-    let cell = state.new_req(req.clone());
-
-    stream_to_server.write_all(&req).await.unwrap();
-    let resp = if has_upgrade {
-        sniff(stream_from_client, stream_to_server).await
-    } else {
-        let resp = read_resp(&mut stream_to_server).await.unwrap(); // sniff(stream, server).await;
-        stream_from_client.write_all(resp.as_ref()).await?;
-        stream_from_client.shutdown().await.unwrap();
-        stream_to_server.shutdown().await.unwrap();
-        resp
-    };
-
-    cell.set(resp);
-    */
 
     Ok(())
 }
@@ -239,114 +225,6 @@ fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     Some(ret)
 }
 
-fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut req = httparse::Request::new(&mut headers);
-    match req.parse(&buf) {
-        Ok(Status::Complete(n)) => {
-            let body = &buf[n..];
-
-            for header in headers
-                .into_iter()
-                .take_while(|h| h != &httparse::EMPTY_HEADER)
-            {
-                match header.name.to_lowercase().as_str() {
-                    "content-length" => {
-                        let len: usize = std::str::from_utf8(header.value)?.parse()?;
-                        return Ok(body.len() >= len);
-                    }
-                    _ => {}
-                }
-            }
-
-            Ok(true)
-        }
-        Ok(Status::Partial) => Ok(false),
-        Err(err) => Err(err.into()), // End communication
-    }
-}
-
-async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<(Vec<u8>, bool)> {
-    let mut buf = Vec::new();
-    while !is_request_end(&buf)? {
-        stream.read_buf(&mut buf).await?;
-    }
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut req = httparse::Request::new(&mut headers);
-    req.parse(&buf).unwrap();
-    let has_upgrade = headers.iter().any(|h| {
-        h.name.to_lowercase().as_str() == "connection"
-            && std::str::from_utf8(h.value).map(|s| s.to_lowercase().contains("upgrade"))
-                == Ok(true)
-    });
-    Ok((buf, has_upgrade))
-}
-
-async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    while {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut resp = httparse::Response::new(&mut headers);
-
-        match resp.parse(&buf).unwrap() {
-            httparse::Status::Complete(n) => {
-                let mut cont = false;
-                for header in headers {
-                    match header.name.to_lowercase().as_str() {
-                        "content-length" => {
-                            let len = String::from_utf8(header.value.to_vec())
-                                .unwrap()
-                                .parse::<usize>()
-                                .unwrap();
-                            cont = buf.len() - n < len;
-                            break;
-                        }
-                        "transfer-encoding" => {
-                            if String::from_utf8(header.value.to_vec())
-                                .unwrap()
-                                .to_lowercase()
-                                .as_str()
-                                == "chunked"
-                            {
-                                let mut body = &buf[n..];
-                                loop {
-                                    let httparse::Status::Complete((offset, len)) =
-                                        httparse::parse_chunk_size(body).unwrap()
-                                    else {
-                                        cont = true;
-                                        break;
-                                    };
-
-                                    let next = offset + len as usize + 2;
-                                    if body.len() < next {
-                                        cont = true;
-                                        break;
-                                    }
-                                    if len == 0 {
-                                        cont = false;
-                                        break;
-                                    }
-                                    body = &body[next..];
-                                }
-                                break;
-                            }
-                        }
-                        _ if header == httparse::EMPTY_HEADER => {
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                cont
-            }
-            httparse::Status::Partial => true,
-        }
-    } {
-        stream.read_buf(&mut buf).await?;
-    }
-    Ok(buf)
-}
-
 async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     mut stream: S,
     state: Arc<Proxy>,
@@ -357,9 +235,9 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
     if method == "CONNECT" {
         stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
-        tunnel(stream, path.parse().unwrap(), state).await.unwrap();
+        tunnel(stream, path.parse()?, state).await?;
     } else {
-        let uri = Uri::try_from(path.as_str()).unwrap();
+        let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
         let cell = state.new_req(buf.clone());
         let mut server = TcpStream::connect(format!(
@@ -376,12 +254,12 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             let resp = sniff(stream, server).await;
             cell.set(resp);
         } else {
-            let resp = read_resp(&mut server).await.unwrap(); // sniff(stream, server).await;
+            let resp = read_resp(&mut server).await?;
             stream.write_all(resp.as_ref()).await?;
             cell.set(resp);
 
             loop {
-                let (req, has_upgrade) = read_req(&mut stream).await.unwrap();
+                let (req, has_upgrade) = read_req(&mut stream).await?;
                 let cell = state.new_req(req.clone());
 
                 if has_upgrade {
@@ -389,8 +267,8 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                     cell.set(resp);
                     break;
                 } else {
-                    server.write_all(&req).await.unwrap();
-                    let resp = read_resp(&mut server).await.unwrap();
+                    server.write_all(&req).await?;
+                    let resp = read_resp(&mut server).await?;
                     stream.write_all(resp.as_ref()).await?;
                     cell.set(resp);
                 }
@@ -471,7 +349,11 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
     loop {
         let (stream, _) = tcp_listener.accept().await?;
         let state = state.clone();
-        tokio::spawn(async move { proxy(stream, state).await });
+        tokio::spawn(async move {
+            if let Err(err) = proxy(stream, state).await {
+                eprintln!("Error: {}", err);
+            }
+        });
     }
 }
 
