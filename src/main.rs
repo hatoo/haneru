@@ -64,7 +64,7 @@ fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
 
 #[tokio::main]
 async fn main() {
-    let (tx, _) = broadcast::channel(16);
+    let (tx, _) = broadcast::channel(128);
     let txs = tx.clone();
 
     let state = Arc::new(Proxy {
@@ -103,7 +103,7 @@ async fn main() {
 async fn cert() -> impl IntoResponse {
     let headers = axum::http::HeaderMap::from_iter([(
         header::CONTENT_DISPOSITION,
-        "attachment; filename=\"ca.crt\"".try_into().unwrap(),
+        header::HeaderValue::from_static("attachment; filename=\"ca.crt\""),
     )]);
 
     (headers, root_cert().await.serialize_pem().unwrap())
