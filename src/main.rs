@@ -10,7 +10,7 @@ use axum::{
 };
 use futures::{stream, Stream, StreamExt};
 use http::{read_req, read_resp};
-use hyper::{header, Uri};
+use hyper::{client::conn, header, Uri};
 use moka::sync::Cache;
 use rcgen::CertificateParams;
 use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
@@ -139,7 +139,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         )?;
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-    let mut stream_from_client = tls_acceptor.accept(upgraded).await?;
+    let client = tls_acceptor.accept(upgraded).await?;
 
     // Connect to remote server
 
@@ -158,28 +158,14 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .with_no_client_auth(); // i guess this was previously the default?
     let connector = TlsConnector::from(Arc::new(config));
     let server = TcpStream::connect(uri.authority().context("no authority")?.to_string()).await?;
-    let mut stream_to_server = connector
+    let server = connector
         .connect(
             ServerName::try_from(uri.host().context("no host")?)?,
             server,
         )
         .await?;
 
-    loop {
-        let (req, has_upgrade) = read_req(&mut stream_from_client).await?;
-        let cell = state.new_req(req.clone());
-
-        if has_upgrade {
-            let resp = sniff(stream_from_client, stream_to_server).await;
-            cell.set(resp);
-            break;
-        } else {
-            stream_to_server.write_all(&req).await?;
-            let resp = read_resp(&mut stream_to_server).await?;
-            stream_from_client.write_all(resp.as_ref()).await?;
-            cell.set(resp);
-        }
-    }
+    conn_loop(client, server, state).await?;
 
     Ok(())
 }
@@ -258,22 +244,34 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             stream.write_all(resp.as_ref()).await?;
             cell.set(resp);
 
-            loop {
-                let (req, has_upgrade) = read_req(&mut stream).await?;
-                let cell = state.new_req(req.clone());
-
-                if has_upgrade {
-                    let resp = sniff(stream, server).await;
-                    cell.set(resp);
-                    break;
-                } else {
-                    server.write_all(&req).await?;
-                    let resp = read_resp(&mut server).await?;
-                    stream.write_all(resp.as_ref()).await?;
-                    cell.set(resp);
-                }
-            }
+            conn_loop(stream, server, state).await?;
         };
+    }
+    Ok(())
+}
+
+async fn conn_loop<
+    S1: AsyncReadExt + AsyncWriteExt + Unpin,
+    S2: AsyncReadExt + AsyncWriteExt + Unpin,
+>(
+    mut client: S1,
+    mut server: S2,
+    state: Arc<Proxy>,
+) -> anyhow::Result<()> {
+    loop {
+        let (req, has_upgrade) = read_req(&mut client).await?;
+        let cell = state.new_req(req.clone());
+
+        if has_upgrade {
+            let resp = sniff(client, server).await;
+            cell.set(resp);
+            break;
+        } else {
+            server.write_all(&req).await?;
+            let resp = read_resp(&mut server).await?;
+            client.write_all(resp.as_ref()).await?;
+            cell.set(resp);
+        }
     }
     Ok(())
 }
