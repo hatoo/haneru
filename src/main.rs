@@ -1,3 +1,4 @@
+use anyhow::Context;
 use askama::Template;
 use askama_axum::IntoResponse;
 use async_cell::sync::AsyncCell;
@@ -8,6 +9,7 @@ use axum::{
     Router,
 };
 use futures::{stream, Stream, StreamExt};
+use httparse::Status;
 use hyper::{header, Uri};
 use moka::sync::Cache;
 use rcgen::CertificateParams;
@@ -70,7 +72,7 @@ async fn main() {
     let state = Arc::new(Proxy {
         tx,
         id_counter: AtomicUsize::new(0),
-        map: Cache::new(2048),
+        map: Cache::new(128),
     });
 
     let state_app = state.clone();
@@ -237,13 +239,36 @@ fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     Some(ret)
 }
 
+fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
+    match req.parse(&buf) {
+        Ok(Status::Complete(n)) => {
+            let body = &buf[n..];
+
+            for header in headers
+                .into_iter()
+                .take_while(|h| h != &httparse::EMPTY_HEADER)
+            {
+                match header.name.to_lowercase().as_str() {
+                    "content-length" => {
+                        let len: usize = std::str::from_utf8(header.value)?.parse()?;
+                        return Ok(body.len() >= len);
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(true)
+        }
+        Ok(Status::Partial) => Ok(false),
+        Err(err) => Err(err.into()), // End communication
+    }
+}
+
 async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<(Vec<u8>, bool)> {
     let mut buf = Vec::new();
-    while {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut req = httparse::Request::new(&mut headers);
-        req.parse(&buf).unwrap().is_partial()
-    } {
+    while !is_request_end(&buf)? {
         stream.read_buf(&mut buf).await?;
     }
     let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -251,11 +276,8 @@ async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<(Ve
     req.parse(&buf).unwrap();
     let has_upgrade = headers.iter().any(|h| {
         h.name.to_lowercase().as_str() == "connection"
-            && String::from_utf8(h.value.to_vec())
-                .unwrap()
-                .to_lowercase()
-                .as_str()
-                == "upgrade"
+            && std::str::from_utf8(h.value).map(|s| s.to_lowercase().contains("upgrade"))
+                == Ok(true)
     });
     Ok((buf, has_upgrade))
 }
@@ -331,7 +353,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 ) -> anyhow::Result<()> {
     let (buf, has_upgrade) = read_req(&mut stream).await?;
 
-    let [method, path, _version] = parse_path(&buf).unwrap();
+    let [method, path, _version] = parse_path(&buf).context("failed to parse the first line")?;
 
     if method == "CONNECT" {
         stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
@@ -441,15 +463,15 @@ impl Proxy {
 async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
 
-    let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(addr)
+        .await
+        .expect(&format!("failed to bind {}", &addr));
     println!("HTTP Proxy is Listening on http://{}/", addr);
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
         let state = state.clone();
-        tokio::spawn(async move {
-            proxy(stream, state).await.unwrap();
-        });
+        tokio::spawn(async move { proxy(stream, state).await });
     }
 }
 
