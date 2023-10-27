@@ -11,6 +11,7 @@ askama = "0.12.1"
 askama_axum = "0.3.0"
 async_cell = "0.2.2"
 axum = "0.6.20"
+clap = { version = "4.4.7", features = ["derive"] }
 futures = "0.3.28"
 httparse = "1.8.0"
 hyper = { version = "0.14.27", features = ["full"] }

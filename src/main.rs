@@ -8,6 +8,7 @@ use axum::{
     routing::get,
     Router,
 };
+use clap::Parser;
 use futures::{stream, Stream, StreamExt};
 use http::{read_req, read_resp};
 use hyper::{header, Uri};
@@ -17,6 +18,7 @@ use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
 use std::{
     convert::Infallible,
     net::SocketAddr,
+    path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
 };
 use tokio::{
@@ -29,25 +31,25 @@ use tower_http::services::ServeDir;
 
 mod http;
 
+static ROOT_CERT: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
 async fn root_cert() -> &'static rcgen::Certificate {
-    static ONCE: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
+    ROOT_CERT
+        .get_or_init(|| async {
+            let mut param = rcgen::CertificateParams::default();
 
-    ONCE.get_or_init(|| async {
-        let mut param = rcgen::CertificateParams::default();
-
-        param.distinguished_name = rcgen::DistinguishedName::new();
-        param.distinguished_name.push(
-            rcgen::DnType::CommonName,
-            rcgen::DnValue::Utf8String("<HANERU CA>".to_string()),
-        );
-        param.key_usages = vec![
-            rcgen::KeyUsagePurpose::KeyCertSign,
-            rcgen::KeyUsagePurpose::CrlSign,
-        ];
-        param.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        rcgen::Certificate::from_params(param).unwrap()
-    })
-    .await
+            param.distinguished_name = rcgen::DistinguishedName::new();
+            param.distinguished_name.push(
+                rcgen::DnType::CommonName,
+                rcgen::DnValue::Utf8String("<HANERU CA>".to_string()),
+            );
+            param.key_usages = vec![
+                rcgen::KeyUsagePurpose::KeyCertSign,
+                rcgen::KeyUsagePurpose::CrlSign,
+            ];
+            param.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            rcgen::Certificate::from_params(param).unwrap()
+        })
+        .await
 }
 
 fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
@@ -66,8 +68,29 @@ fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
     cert
 }
 
+#[derive(clap::Parser)]
+struct Opt {
+    #[clap(short, long)]
+    cert: Option<PathBuf>,
+    #[clap(short, long)]
+    private_key: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() {
+    let args = Opt::parse();
+
+    if let (Some(cert), Some(private_key)) = (args.cert, args.private_key) {
+        let param = rcgen::CertificateParams::from_ca_cert_pem(
+            &std::fs::read_to_string(cert).unwrap(),
+            rcgen::KeyPair::from_pem(&std::fs::read_to_string(private_key).unwrap()).unwrap(),
+        )
+        .unwrap();
+        ROOT_CERT
+            .set(rcgen::Certificate::from_params(param).unwrap())
+            .map_err(|_| anyhow::anyhow!("failed to set root cert"))
+            .unwrap();
+    }
     let (tx, _) = broadcast::channel(128);
     let txs = tx.clone();
 
@@ -372,7 +395,7 @@ async fn sse_req(
     let stream = stream::unfold(rx, |mut rx| async {
         let (id, req) = rx.recv().await.unwrap();
 
-        let text = String::from_utf8(req).unwrap();
+        let text = String::from_utf8(req).unwrap_or_else(|_| "invalid utf-8".to_string());
         Some((
             Event::default().event("request").data(
                 RequestText { id, content: &text }
