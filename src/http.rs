@@ -29,10 +29,14 @@ fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
     }
 }
 
-pub async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<(Vec<u8>, bool)> {
+pub async fn read_req<S: AsyncReadExt + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<Option<(Vec<u8>, bool)>> {
     let mut buf = Vec::new();
     while !is_request_end(&buf)? {
-        stream.read_buf(&mut buf).await?;
+        if stream.read_buf(&mut buf).await? == 0 {
+            return Ok(None);
+        };
     }
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
@@ -42,7 +46,7 @@ pub async fn read_req<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result
             && std::str::from_utf8(h.value).map(|s| s.to_lowercase().contains("upgrade"))
                 == Ok(true)
     });
-    Ok((buf, has_upgrade))
+    Ok(Some((buf, has_upgrade)))
 }
 
 fn is_response_end(buf: &[u8]) -> anyhow::Result<bool> {
@@ -97,10 +101,12 @@ fn is_response_end(buf: &[u8]) -> anyhow::Result<bool> {
     }
 }
 
-pub async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
+pub async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
     while !is_response_end(&buf)? {
-        stream.read_buf(&mut buf).await?;
+        if stream.read_buf(&mut buf).await? == 0 {
+            return Ok(None);
+        }
     }
-    Ok(buf)
+    Ok(Some(buf))
 }

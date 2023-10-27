@@ -215,7 +215,9 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     mut stream: S,
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
-    let (buf, has_upgrade) = read_req(&mut stream).await?;
+    let Some((buf, has_upgrade)) = read_req(&mut stream).await? else {
+        return Ok(());
+    };
 
     let [method, path, _version] = parse_path(&buf).context("failed to parse the first line")?;
 
@@ -240,7 +242,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             let resp = sniff(stream, server).await;
             cell.set(resp);
         } else {
-            let resp = read_resp(&mut server).await?;
+            let resp = read_resp(&mut server).await?.context("no resp")?;
             stream.write_all(resp.as_ref()).await?;
             cell.set(resp);
 
@@ -259,7 +261,9 @@ async fn conn_loop<
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
     loop {
-        let (req, has_upgrade) = read_req(&mut client).await?;
+        let Some((req, has_upgrade)) = read_req(&mut client).await? else {
+            return Ok(());
+        };
         let cell = state.new_req(req.clone());
 
         if has_upgrade {
@@ -268,7 +272,7 @@ async fn conn_loop<
             break;
         } else {
             server.write_all(&req).await?;
-            let resp = read_resp(&mut server).await?;
+            let resp = read_resp(&mut server).await?.context("no resp")?;
             client.write_all(resp.as_ref()).await?;
             cell.set(resp);
         }
