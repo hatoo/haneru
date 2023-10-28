@@ -96,8 +96,8 @@ async fn main() {
 
     let state = Arc::new(Proxy {
         tx,
-        id_counter: AtomicUsize::new(0),
-        map: Cache::new(128),
+        id_counter: AtomicUsize::new(1),
+        map: Cache::new(2048),
     });
 
     let state_app = state.clone();
@@ -250,7 +250,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
-        let cell = state.new_req(buf.clone());
+        let cell = state.new_req(uri.clone(), buf.clone());
         let mut server = TcpStream::connect(format!(
             "{}:{}",
             uri.host().unwrap(),
@@ -287,7 +287,9 @@ async fn conn_loop<
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
-        let cell = state.new_req(req.clone());
+        let uri = parse_path(&req).context("bad req")?[1].clone();
+        let uri = Uri::try_from(uri)?;
+        let cell = state.new_req(uri, req.clone());
 
         if has_upgrade {
             let resp = sniff(client, server).await;
@@ -345,18 +347,38 @@ async fn sniff<
     resp
 }
 
+#[derive(Debug, Clone)]
+struct Request {
+    serial: usize,
+    timestamp: std::time::Instant,
+    uri: Uri,
+    data: Vec<u8>,
+}
+
+impl Request {
+    fn new(serial: usize, uri: Uri, data: Vec<u8>) -> Self {
+        Self {
+            serial,
+            timestamp: std::time::Instant::now(),
+            uri,
+            data,
+        }
+    }
+}
+
 struct Proxy {
-    tx: Sender<(usize, Vec<u8>)>,
+    tx: Sender<Request>,
     id_counter: AtomicUsize,
     map: Cache<usize, Arc<AsyncCell<Vec<u8>>>>,
 }
 
 impl Proxy {
-    fn new_req(&self, req: Vec<u8>) -> Arc<AsyncCell<Vec<u8>>> {
+    fn new_req(&self, uri: Uri, req: Vec<u8>) -> Arc<AsyncCell<Vec<u8>>> {
         let id = self
             .id_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.tx.send((id, req));
+        let req = Request::new(id, uri, req);
+        let _ = self.tx.send(req);
         let cell = Arc::new(AsyncCell::default());
         self.map.insert(id, cell.clone());
         cell
@@ -389,19 +411,20 @@ struct RequestText<'a> {
     content: &'a str,
 }
 
-async fn sse_req(
-    rx: Receiver<(usize, Vec<u8>)>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn sse_req(rx: Receiver<Request>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = stream::unfold(rx, |mut rx| async {
-        let (id, req) = rx.recv().await.unwrap();
+        let req = rx.recv().await.unwrap();
 
-        let text = String::from_utf8(req).unwrap_or_else(|_| "invalid utf-8".to_string());
+        let text = String::from_utf8(req.data).unwrap_or_else(|_| "invalid utf-8".to_string());
         Some((
             Event::default().event("request").data(
-                RequestText { id, content: &text }
-                    .to_string()
-                    .replace("\r", "&#x0D;")
-                    .replace("\n", "&#x0A;"),
+                RequestText {
+                    id: req.serial,
+                    content: &text,
+                }
+                .to_string()
+                .replace("\r", "&#x0D;")
+                .replace("\n", "&#x0A;"),
             ),
             rx,
         ))
