@@ -144,8 +144,12 @@ async fn main() {
             get(move |id| response(id, state_app.clone())),
         )
         .route(
-            "/sse",
+            "/sse/live",
             get(|| async move { sse_req(txs.subscribe()).await }),
+        )
+        .route(
+            "/sse/log",
+            get(|| async move { request_log(log_chan.clone()).await }),
         )
         .nest_service("/static", ServeDir::new("static"));
 
@@ -482,4 +486,32 @@ async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse
     let content = String::from_utf8(resp).unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
 
     ResponseText { content }
+}
+
+async fn request_log(
+    log_chan: Arc<Mutex<LogChan>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    fn to_event(req: Request) -> Event {
+        let text = String::from_utf8(req.data).unwrap_or_else(|_| "invalid utf-8".to_string());
+        Event::default().event("request").data(
+            RequestText {
+                id: req.serial,
+                content: &text,
+            }
+            .to_string()
+            .replace("\r", "&#x0D;")
+            .replace("\n", "&#x0A;"),
+        )
+    }
+
+    let (log, rx) = log_chan.lock().await.now_and_future();
+    let stream = stream::iter(log.into_iter().map(|req| to_event(req)))
+        .chain(stream::unfold(rx, |mut rx| async {
+            let req = rx.recv().await.unwrap();
+
+            Some((to_event(req), rx))
+        }))
+        .map(Ok);
+
+    Sse::new(stream)
 }
