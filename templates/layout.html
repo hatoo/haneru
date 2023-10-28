@@ -13,9 +13,11 @@
     <script src="https://unpkg.com/htmx.org/dist/ext/sse.js"></script>
 </head>
 
-<body>
+<body hx-boost="true">
     <p>It Works!</p>
-    <a href="/cert">cert</a>
+    <a hx-boost="false" href="/cert">cert</a>
+    <a href="/">live</a>
+    <a href="/log">log</a>
     <div>
         {% block content %}{% endblock %}
     </div>
