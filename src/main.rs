@@ -3,7 +3,7 @@ use askama::Template;
 use askama_axum::IntoResponse;
 use async_cell::sync::AsyncCell;
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     http::uri,
     response::sse::{Event, Sse},
     routing::get,
@@ -136,28 +136,24 @@ async fn main() {
     });
 
     let state_app = state.clone();
-    let state_app2 = state.clone();
-    let state_app3 = state.clone();
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
         .route("/log", get(request_log_page))
-        .route("/log/:id", get(|id| request_log_serial(id, state_app3)))
+        .route("/log/:id", get(request_log_serial))
         .route("/cert", get(cert))
-        .route(
-            "/response/:id",
-            get(move |id| response(id, state_app.clone())),
-        )
+        .route("/response/:id", get(response))
         .route(
             "/sse/live",
             get(|| async move { sse_req(txs.subscribe()).await }),
         )
         .route(
             "/sse/log",
-            get(|| async move { request_log(log_chan.clone(), state_app2.clone()).await }),
+            get(|state| async move { request_log(log_chan.clone(), state).await }),
         )
-        .nest_service("/static", ServeDir::new("static"));
+        .nest_service("/static", ServeDir::new("static"))
+        .with_state(state_app);
 
     // run our app with hyper
     // `axum::Server` is a re-export of `hyper::Server`
@@ -494,7 +490,7 @@ async fn sse_req(rx: Receiver<Request>) -> Sse<impl Stream<Item = Result<Event, 
 struct ResponseText {
     content: String,
 }
-async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse {
+async fn response(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
     let Some(cell) = state.response_map.get(&id) else {
         return ResponseText {
             content: "Not Found".to_string(),
@@ -534,7 +530,7 @@ fn req_to_event(req: Request, state: &Proxy) -> Event {
 
 async fn request_log(
     log_chan: Arc<Mutex<LogChan>>,
-    state: Arc<Proxy>,
+    state: State<Arc<Proxy>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let state2 = state.clone();
     let (log, rx) = log_chan.lock().await.now_and_future();
@@ -560,7 +556,7 @@ async fn request_log_page() -> RequestLog {
     RequestLog
 }
 
-async fn request_log_serial(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse {
+async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
     let Some(req) = state.request_map.get(&id) else {
         return "NOT FOUND".to_string();
     };
