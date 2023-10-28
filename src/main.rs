@@ -515,7 +515,7 @@ fn req_to_event(req: Request, state: &Proxy) -> Event {
         .response_map
         .get(&req.serial)
         .and_then(|cell| cell.try_get())
-        .map(|resp| resp.len());
+        .map(|resp| response_body_size(&resp));
 
     Event::default().event("request").data(
         RequestTR {
@@ -526,6 +526,19 @@ fn req_to_event(req: Request, state: &Proxy) -> Event {
         .replace("\r", "&#x0D;")
         .replace("\n", "&#x0A;"),
     )
+}
+
+fn response_body_size(response: &[u8]) -> usize {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+
+    if let httparse::Status::Complete(n) = httparse::Response::new(&mut headers)
+        .parse(response)
+        .unwrap()
+    {
+        n
+    } else {
+        0
+    }
 }
 
 async fn request_log(
@@ -562,7 +575,7 @@ async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> 
     };
 
     let response_size = if let Some(cell) = state.response_map.get(&id) {
-        Some(cell.get().await.len())
+        Some(response_body_size(&cell.get().await))
     } else {
         Some(0)
     };
