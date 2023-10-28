@@ -4,6 +4,7 @@ use askama_axum::IntoResponse;
 use async_cell::sync::AsyncCell;
 use axum::{
     extract::Path,
+    http::uri,
     response::sse::{Event, Sse},
     routing::get,
     Router,
@@ -226,7 +227,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         )
         .await?;
 
-    conn_loop(client, server, state).await?;
+    conn_loop(client, server, dbg!(uri), state).await?;
 
     Ok(())
 }
@@ -283,8 +284,13 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     let [method, path, _version] = parse_path(&buf).context("failed to parse the first line")?;
 
     if method == "CONNECT" {
+        let uri: Uri = path.parse()?;
+        let mut parts = uri.into_parts();
+        dbg!(&parts);
+        parts.scheme = Some(uri::Scheme::HTTPS);
+        parts.path_and_query = Some(uri::PathAndQuery::from_static("/"));
         stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
-        tunnel(stream, path.parse()?, state).await?;
+        tunnel(stream, Uri::from_parts(parts)?, state).await?;
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
@@ -307,7 +313,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             stream.write_all(resp.as_ref()).await?;
             cell.set(resp);
 
-            conn_loop(stream, server, state).await?;
+            conn_loop(stream, server, uri, state).await?;
         };
     }
     Ok(())
@@ -319,15 +325,18 @@ async fn conn_loop<
 >(
     mut client: S1,
     mut server: S2,
+    base: Uri,
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
     loop {
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
+        let mut base_parts = base.clone().into_parts();
         let uri = parse_path(&req).context("bad req")?[1].clone();
         let uri = Uri::try_from(uri)?;
-        let cell = state.new_req(uri, req.clone());
+        base_parts.path_and_query = uri.path_and_query().cloned();
+        let cell = state.new_req(Uri::from_parts(base_parts).context("here")?, req.clone());
 
         if has_upgrade {
             let resp = sniff(client, server).await;
