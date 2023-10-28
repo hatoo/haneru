@@ -176,12 +176,12 @@ async fn cert() -> impl IntoResponse {
 }
 
 #[derive(Template)]
-#[template(path = "index.html")]
-struct Index;
+#[template(path = "live.html")]
+struct Live;
 
 // basic handler that responds with a static string
-async fn root() -> Index {
-    Index
+async fn root() -> Live {
+    Live
 }
 
 async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
@@ -217,7 +217,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     let config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_cert_store)
-        .with_no_client_auth(); // i guess this was previously the default?
+        .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
     let server = TcpStream::connect(uri.authority().context("no authority")?.to_string()).await?;
     let server = connector
