@@ -14,13 +14,17 @@
 </head>
 
 <body hx-boost="true">
-    <h1>Haneru Proxy -- {% block subtitle %}{% endblock %}</h1>
-    <a hx-boost="false" href="/cert">cert</a>
-    <a href="/">live</a>
-    <a href="/log">log</a>
-    <div>
+    <header>
+        <h1>Haneru Proxy -- {% block subtitle %}{% endblock %}</h1>
+        <nav>
+            <a hx-boost="false" href="/cert">cert</a>
+            <a href="/">live</a>
+            <a href="/log">log</a>
+        </nav>
+    </header>
+    <main>
         {% block content %}{% endblock %}
-    </div>
+    </main>
 </body>
 
 </html>

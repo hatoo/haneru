@@ -290,11 +290,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
-        let cell = state.new_req(
-            format!("http://{}", uri.host().unwrap()),
-            uri.path_and_query().unwrap().to_string(),
-            buf.clone(),
-        );
+        let cell = state.new_req(format!("http://{}", uri.host().unwrap()), buf.clone());
         let mut server = TcpStream::connect(format!(
             "{}:{}",
             uri.host().unwrap(),
@@ -333,10 +329,8 @@ async fn conn_loop<
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
-        let uri = parse_path(&req).context("bad req")?[1].clone();
         let cell = state.new_req(
             format!("{}://{}", scheme, base.host().unwrap()),
-            uri,
             req.clone(),
         );
 
@@ -400,20 +394,24 @@ async fn sniff<
 struct Request {
     serial: usize,
     timestamp: std::time::Instant,
+    method: String,
     host: String,
-    path_and_query: String,
+    path: String,
     data: Vec<u8>,
 }
 
 impl Request {
-    fn new(serial: usize, host: String, path_and_query: String, data: Vec<u8>) -> Self {
-        Self {
+    fn new(serial: usize, host: String, data: Vec<u8>) -> anyhow::Result<Self> {
+        let [method, path, version] =
+            parse_path(&data).context("failed to parse the first line")?;
+        Ok(Self {
             serial,
             timestamp: std::time::Instant::now(),
+            method,
             host,
-            path_and_query,
+            path,
             data,
-        }
+        })
     }
 }
 
@@ -424,16 +422,11 @@ struct Proxy {
 }
 
 impl Proxy {
-    fn new_req(
-        &self,
-        host: String,
-        path_and_query: String,
-        req: Vec<u8>,
-    ) -> Arc<AsyncCell<Vec<u8>>> {
+    fn new_req(&self, host: String, req: Vec<u8>) -> Arc<AsyncCell<Vec<u8>>> {
         let id = self
             .id_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let req = Request::new(id, host, path_and_query, req);
+        let req = Request::new(id, host, req).unwrap();
         let _ = self.tx.send(req);
         let cell = Arc::new(AsyncCell::default());
         self.map.insert(id, cell.clone());
