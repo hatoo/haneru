@@ -16,6 +16,7 @@ use moka::sync::Cache;
 use rcgen::CertificateParams;
 use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
 use std::{
+    collections::VecDeque,
     convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
@@ -24,7 +25,10 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::broadcast::{self, Receiver, Sender},
+    sync::{
+        broadcast::{self, Receiver, Sender},
+        Mutex,
+    },
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tower_http::services::ServeDir;
@@ -76,6 +80,17 @@ struct Opt {
     private_key: Option<PathBuf>,
 }
 
+struct LogChan {
+    log: VecDeque<Request>,
+    tx: broadcast::Sender<Request>,
+}
+
+impl LogChan {
+    fn now_and_future(&self) -> (VecDeque<Request>, broadcast::Receiver<Request>) {
+        (self.log.clone(), self.tx.subscribe())
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = Opt::parse();
@@ -98,6 +113,24 @@ async fn main() {
         tx,
         id_counter: AtomicUsize::new(1),
         map: Cache::new(2048),
+    });
+
+    let (log_tx, _) = broadcast::channel(128);
+    let log_chan = Arc::new(Mutex::new(LogChan {
+        log: VecDeque::new(),
+        tx: log_tx,
+    }));
+
+    let mut rx = txs.subscribe();
+    let lc = log_chan.clone();
+    tokio::spawn(async move {
+        loop {
+            let req = rx.recv().await.unwrap();
+
+            let mut lock = lc.lock().await;
+            lock.log.push_back(req.clone());
+            let _ = lock.tx.send(req);
+        }
     });
 
     let state_app = state.clone();
