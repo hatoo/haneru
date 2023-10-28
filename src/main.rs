@@ -303,11 +303,11 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
         if has_upgrade {
             let resp = sniff(stream, server).await;
-            cell.set(resp);
+            cell.set(Arc::new(resp));
         } else {
             let resp = read_resp(&mut server).await?.context("no resp")?;
             stream.write_all(resp.as_ref()).await?;
-            cell.set(resp);
+            cell.set(Arc::new(resp));
 
             conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
         };
@@ -336,13 +336,13 @@ async fn conn_loop<
 
         if has_upgrade {
             let resp = sniff(client, server).await;
-            cell.set(resp);
+            cell.set(Arc::new(resp));
             break;
         } else {
             server.write_all(&req).await?;
             let resp = read_resp(&mut server).await?.context("no resp")?;
             client.write_all(resp.as_ref()).await?;
-            cell.set(resp);
+            cell.set(Arc::new(resp));
         }
     }
     Ok(())
@@ -418,11 +418,11 @@ impl Request {
 struct Proxy {
     tx: Sender<Request>,
     id_counter: AtomicUsize,
-    map: Cache<usize, Arc<AsyncCell<Vec<u8>>>>,
+    map: Cache<usize, Arc<AsyncCell<Arc<Vec<u8>>>>>,
 }
 
 impl Proxy {
-    fn new_req(&self, host: String, req: Vec<u8>) -> Arc<AsyncCell<Vec<u8>>> {
+    fn new_req(&self, host: String, req: Vec<u8>) -> Arc<AsyncCell<Arc<Vec<u8>>>> {
         let id = self
             .id_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -495,7 +495,8 @@ async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse
         };
     };
     let resp = cell.get().await;
-    let content = String::from_utf8(resp).unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
+    let content = String::from_utf8(resp.as_ref().clone())
+        .unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
 
     ResponseText { content }
 }
