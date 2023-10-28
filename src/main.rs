@@ -75,9 +75,9 @@ fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
 
 #[derive(clap::Parser)]
 struct Opt {
-    #[clap(short, long)]
+    #[clap(short, long, requires("private_key"))]
     cert: Option<PathBuf>,
-    #[clap(short, long)]
+    #[clap(short, long, requires("cert"))]
     private_key: Option<PathBuf>,
 }
 
