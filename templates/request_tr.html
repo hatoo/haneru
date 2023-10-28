@@ -1,6 +1,10 @@
-<tr>
+{% let is_partial = response_size.is_none() %}
+{% let response_size = response_size.unwrap_or(0) %}
+
+<tr {% if is_partial %} hx-trigger="load" hx-swap="outerHTML" hx-get="/log/{{request.serial}}" {% endif %}>
     <td>{{request.serial}}</td>
     <td>{{request.host}}</td>
     <td>{{request.method}}</td>
     <td>{{request.path}}</td>
+    <td>{{response_size}}</td>
 </tr>

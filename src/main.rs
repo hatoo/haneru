@@ -113,7 +113,8 @@ async fn main() {
     let state = Arc::new(Proxy {
         tx,
         id_counter: AtomicUsize::new(1),
-        map: Cache::new(2048),
+        response_map: Cache::new(2048),
+        request_map: Cache::new(2048),
     });
 
     let (log_tx, _) = broadcast::channel(128);
@@ -135,11 +136,14 @@ async fn main() {
     });
 
     let state_app = state.clone();
+    let state_app2 = state.clone();
+    let state_app3 = state.clone();
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
         .route("/log", get(request_log_page))
+        .route("/log/:id", get(|id| request_log_serial(id, state_app3)))
         .route("/cert", get(cert))
         .route(
             "/response/:id",
@@ -151,7 +155,7 @@ async fn main() {
         )
         .route(
             "/sse/log",
-            get(|| async move { request_log(log_chan.clone()).await }),
+            get(|| async move { request_log(log_chan.clone(), state_app2.clone()).await }),
         )
         .nest_service("/static", ServeDir::new("static"));
 
@@ -418,7 +422,8 @@ impl Request {
 struct Proxy {
     tx: Sender<Request>,
     id_counter: AtomicUsize,
-    map: Cache<usize, Arc<AsyncCell<Arc<Vec<u8>>>>>,
+    response_map: Cache<usize, Arc<AsyncCell<Arc<Vec<u8>>>>>,
+    request_map: Cache<usize, Arc<Request>>,
 }
 
 impl Proxy {
@@ -427,9 +432,10 @@ impl Proxy {
             .id_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let req = Request::new(id, host, req).unwrap();
-        let _ = self.tx.send(req);
+        let _ = self.tx.send(req.clone());
         let cell = Arc::new(AsyncCell::default());
-        self.map.insert(id, cell.clone());
+        self.response_map.insert(id, cell.clone());
+        self.request_map.insert(id, Arc::new(req));
         cell
     }
 }
@@ -489,7 +495,7 @@ struct ResponseText {
     content: String,
 }
 async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse {
-    let Some(cell) = state.map.get(&id) else {
+    let Some(cell) = state.response_map.get(&id) else {
         return ResponseText {
             content: "Not Found".to_string(),
         };
@@ -505,27 +511,42 @@ async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse
 #[template(path = "request_tr.html")]
 struct RequestTR {
     request: Request,
+    response_size: Option<usize>,
+}
+
+fn req_to_event(req: Request, state: &Proxy) -> Event {
+    let response_size = state
+        .response_map
+        .get(&req.serial)
+        .and_then(|cell| cell.try_get())
+        .map(|resp| resp.len());
+
+    Event::default().event("request").data(
+        RequestTR {
+            request: req,
+            response_size,
+        }
+        .to_string()
+        .replace("\r", "&#x0D;")
+        .replace("\n", "&#x0A;"),
+    )
 }
 
 async fn request_log(
     log_chan: Arc<Mutex<LogChan>>,
+    state: Arc<Proxy>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    fn to_event(req: Request) -> Event {
-        Event::default().event("request").data(
-            RequestTR { request: req }
-                .to_string()
-                .replace("\r", "&#x0D;")
-                .replace("\n", "&#x0A;"),
-        )
-    }
-
+    let state2 = state.clone();
     let (log, rx) = log_chan.lock().await.now_and_future();
-    let stream = stream::iter(log.into_iter().map(|req| to_event(req)))
-        .chain(stream::unfold(rx, |mut rx| async {
-            let req = rx.recv().await.unwrap();
+    let stream = stream::iter(log.into_iter().map(move |req| req_to_event(req, &state)))
+        .chain(stream::unfold(
+            (rx, state2),
+            move |(mut rx, state)| async move {
+                let req = rx.recv().await.unwrap();
 
-            Some((to_event(req), rx))
-        }))
+                Some((req_to_event(req, &state), (rx, state)))
+            },
+        ))
         .map(Ok);
 
     Sse::new(stream)
@@ -537,4 +558,22 @@ struct RequestLog;
 
 async fn request_log_page() -> RequestLog {
     RequestLog
+}
+
+async fn request_log_serial(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse {
+    let Some(req) = state.request_map.get(&id) else {
+        return "NOT FOUND".to_string();
+    };
+
+    let response_size = if let Some(cell) = state.response_map.get(&id) {
+        Some(cell.get().await.len())
+    } else {
+        Some(0)
+    };
+
+    RequestTR {
+        request: req.as_ref().clone(),
+        response_size,
+    }
+    .to_string()
 }
