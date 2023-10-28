@@ -1,5 +1,9 @@
 {% extends "layout.html" %}
 
+{% block subtitle %}
+Live
+{% endblock subtitle %}
+
 {% block content %}
 <div hx-ext="sse" sse-connect="/sse/live" sse-swap="request" hx-swap="afterend"></div>
 {% endblock content %}
