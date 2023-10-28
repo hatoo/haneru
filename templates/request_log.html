@@ -1,0 +1,16 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div>
+    <table>
+        <thead>
+            <tr>
+                <th>Serial</th>
+                <th>Uri</th>
+            </tr>
+        </thead>
+        <tbody hx-ext="sse" sse-connect="/sse/log" sse-swap="request" hx-swap="beforeend">
+        </tbody>
+    </table>
+</div>
+{% endblock content %}

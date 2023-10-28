@@ -138,6 +138,7 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
+        .route("/log", get(request_log_page))
         .route("/cert", get(cert))
         .route(
             "/response/:id",
@@ -488,19 +489,21 @@ async fn response(Path(id): Path<usize>, state: Arc<Proxy>) -> impl IntoResponse
     ResponseText { content }
 }
 
+#[derive(Template)]
+#[template(path = "request_tr.html")]
+struct RequestTR {
+    request: Request,
+}
+
 async fn request_log(
     log_chan: Arc<Mutex<LogChan>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     fn to_event(req: Request) -> Event {
-        let text = String::from_utf8(req.data).unwrap_or_else(|_| "invalid utf-8".to_string());
         Event::default().event("request").data(
-            RequestText {
-                id: req.serial,
-                content: &text,
-            }
-            .to_string()
-            .replace("\r", "&#x0D;")
-            .replace("\n", "&#x0A;"),
+            RequestTR { request: req }
+                .to_string()
+                .replace("\r", "&#x0D;")
+                .replace("\n", "&#x0A;"),
         )
     }
 
@@ -514,4 +517,12 @@ async fn request_log(
         .map(Ok);
 
     Sse::new(stream)
+}
+
+#[derive(Template)]
+#[template(path = "request_log.html")]
+struct RequestLog;
+
+async fn request_log_page() -> RequestLog {
+    RequestLog
 }
