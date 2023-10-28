@@ -227,7 +227,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         )
         .await?;
 
-    conn_loop(client, server, dbg!(uri), state).await?;
+    conn_loop(client, server, uri::Scheme::HTTPS, uri, state).await?;
 
     Ok(())
 }
@@ -285,16 +285,16 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
     if method == "CONNECT" {
         let uri: Uri = path.parse()?;
-        let mut parts = uri.into_parts();
-        dbg!(&parts);
-        parts.scheme = Some(uri::Scheme::HTTPS);
-        parts.path_and_query = Some(uri::PathAndQuery::from_static("/"));
         stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
-        tunnel(stream, Uri::from_parts(parts)?, state).await?;
+        tunnel(stream, uri, state).await?;
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
-        let cell = state.new_req(uri.clone(), buf.clone());
+        let cell = state.new_req(
+            format!("http://{}", uri.host().unwrap()),
+            uri.path_and_query().unwrap().to_string(),
+            buf.clone(),
+        );
         let mut server = TcpStream::connect(format!(
             "{}:{}",
             uri.host().unwrap(),
@@ -313,7 +313,7 @@ async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             stream.write_all(resp.as_ref()).await?;
             cell.set(resp);
 
-            conn_loop(stream, server, uri, state).await?;
+            conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
         };
     }
     Ok(())
@@ -325,6 +325,7 @@ async fn conn_loop<
 >(
     mut client: S1,
     mut server: S2,
+    scheme: uri::Scheme,
     base: Uri,
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
@@ -332,11 +333,12 @@ async fn conn_loop<
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
-        let mut base_parts = base.clone().into_parts();
         let uri = parse_path(&req).context("bad req")?[1].clone();
-        let uri = Uri::try_from(uri)?;
-        base_parts.path_and_query = uri.path_and_query().cloned();
-        let cell = state.new_req(Uri::from_parts(base_parts).context("here")?, req.clone());
+        let cell = state.new_req(
+            format!("{}://{}", scheme, base.host().unwrap()),
+            uri,
+            req.clone(),
+        );
 
         if has_upgrade {
             let resp = sniff(client, server).await;
@@ -398,16 +400,18 @@ async fn sniff<
 struct Request {
     serial: usize,
     timestamp: std::time::Instant,
-    uri: Uri,
+    host: String,
+    path_and_query: String,
     data: Vec<u8>,
 }
 
 impl Request {
-    fn new(serial: usize, uri: Uri, data: Vec<u8>) -> Self {
+    fn new(serial: usize, host: String, path_and_query: String, data: Vec<u8>) -> Self {
         Self {
             serial,
             timestamp: std::time::Instant::now(),
-            uri,
+            host,
+            path_and_query,
             data,
         }
     }
@@ -420,11 +424,16 @@ struct Proxy {
 }
 
 impl Proxy {
-    fn new_req(&self, uri: Uri, req: Vec<u8>) -> Arc<AsyncCell<Vec<u8>>> {
+    fn new_req(
+        &self,
+        host: String,
+        path_and_query: String,
+        req: Vec<u8>,
+    ) -> Arc<AsyncCell<Vec<u8>>> {
         let id = self
             .id_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let req = Request::new(id, uri, req);
+        let req = Request::new(id, host, path_and_query, req);
         let _ = self.tx.send(req);
         let cell = Arc::new(AsyncCell::default());
         self.map.insert(id, cell.clone());
