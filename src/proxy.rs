@@ -138,7 +138,7 @@ async fn conn_loop<
         } else {
             server.write_all(&req).await?;
             let resp = read_resp(&mut server).await?.context("no resp")?;
-            client.write_all(resp.as_ref()).await?;
+            client.write_all(&resp).await?;
             cell.set(Arc::new(resp));
         }
     }
