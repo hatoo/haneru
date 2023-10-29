@@ -14,12 +14,9 @@ fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
                 .into_iter()
                 .take_while(|h| h != &httparse::EMPTY_HEADER)
             {
-                match header.name.to_lowercase().as_str() {
-                    "content-length" => {
-                        let len: usize = std::str::from_utf8(header.value)?.parse()?;
-                        return Ok(body.len() >= len);
-                    }
-                    _ => {}
+                if header.name.to_lowercase().as_str() == "content-length" {
+                    let len: usize = std::str::from_utf8(header.value)?.parse()?;
+                    return Ok(body.len() >= len);
                 }
             }
 
