@@ -15,30 +15,39 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::{
     http::{parse_path, read_req, read_resp, replace_path},
-    make_cert, root_cert, Request,
+    make_cert, root_cert, RequestLog, Server,
 };
 
 pub struct Proxy {
-    tx: Sender<Request>,
+    tx: Sender<Arc<RequestLog>>,
     serial_counter: AtomicUsize,
     response_map: Cache<usize, Arc<AsyncCell<Arc<Vec<u8>>>>>,
-    request_map: Cache<usize, Arc<Request>>,
+    request_map: Cache<usize, Arc<RequestLog>>,
 }
 
 impl Proxy {
+    pub fn new(tx: Sender<Arc<RequestLog>>) -> Self {
+        Self {
+            tx,
+            serial_counter: AtomicUsize::new(1),
+            response_map: Cache::new(2048),
+            request_map: Cache::new(2048),
+        }
+    }
+
     pub fn new_req(&self, host: String, req: Vec<u8>) -> Arc<AsyncCell<Arc<Vec<u8>>>> {
         let id = self
             .serial_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let req = Request::new(id, host, req).unwrap();
+        let req = Arc::new(RequestLog::new(id, host, req).unwrap());
         let _ = self.tx.send(req.clone());
         let cell = Arc::new(AsyncCell::default());
         self.response_map.insert(id, cell.clone());
-        self.request_map.insert(id, Arc::new(req));
+        self.request_map.insert(id, req);
         cell
     }
 
-    pub fn request(&self, serial: usize) -> Option<Arc<Request>> {
+    pub fn request(&self, serial: usize) -> Option<Arc<RequestLog>> {
         self.request_map.get(&serial)
     }
 
@@ -48,20 +57,15 @@ impl Proxy {
         Some(resp)
     }
 
-    pub fn try_response(&self, serial: usize) -> Option<Arc<Vec<u8>>> {
-        let cell = self.response_map.get(&serial)?;
-        cell.try_get()
-    }
-}
-
-impl Default for Proxy {
-    fn default() -> Self {
-        let (tx, _) = tokio::sync::broadcast::channel(128);
-        Self {
-            tx,
-            serial_counter: AtomicUsize::new(0),
-            response_map: Cache::new(2048),
-            request_map: Cache::new(2048),
+    pub fn try_response(&self, serial: usize) -> Server<Arc<Vec<u8>>> {
+        if let Some(cell) = self.response_map.get(&serial) {
+            if let Some(resp) = cell.try_get() {
+                Server::Some(resp)
+            } else {
+                Server::Ongoing
+            }
+        } else {
+            Server::Expired
         }
     }
 }
@@ -126,6 +130,7 @@ async fn conn_loop<
             format!("{}://{}", scheme, base.host().unwrap()),
             req.clone(),
         );
+        dbg!("here");
 
         if has_upgrade {
             let resp = sniff(client, server).await;

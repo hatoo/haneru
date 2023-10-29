@@ -10,7 +10,8 @@ use axum::{
 use clap::Parser;
 use futures::{stream, Stream, StreamExt};
 use http::parse_path;
-use hyper::header;
+use httparse::Status;
+use hyper::{header, HeaderMap};
 use rcgen::CertificateParams;
 use sse::replace_cr;
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -89,10 +90,10 @@ async fn main() {
             .map_err(|_| anyhow::anyhow!("failed to set root cert"))
             .unwrap();
     }
-    let (tx, _) = broadcast::channel::<Arc<Request>>(128);
+    let (tx, _) = broadcast::channel::<Arc<RequestLog>>(128);
     let txs = tx.clone();
 
-    let state = Arc::new(Proxy::default());
+    let state = Arc::new(Proxy::new(tx));
 
     let log_chan = Arc::new(Mutex::new(LogChan::default()));
 
@@ -110,9 +111,8 @@ async fn main() {
     let state_app = state.clone();
     // build our application with a route
     let app = Router::new()
-        // `GET /` goes to `root`
         .route("/", get(|| async { Live }))
-        .route("/log", get(|| async { RequestLog }))
+        .route("/log", get(|| async { Log }))
         .route("/log/:id", get(request_log_serial))
         .route("/cert", get(cert))
         .route("/response/:id", get(response))
@@ -152,7 +152,7 @@ async fn cert() -> impl IntoResponse {
 struct Live;
 
 #[derive(Debug, Clone)]
-pub struct Request {
+pub struct RequestLog {
     serial: usize,
     timestamp: std::time::Instant,
     method: String,
@@ -161,7 +161,7 @@ pub struct Request {
     data: Vec<u8>,
 }
 
-impl Request {
+impl RequestLog {
     fn new(serial: usize, host: String, data: Vec<u8>) -> anyhow::Result<Self> {
         let [method, path, _version] =
             parse_path(&data).context("failed to parse the first line")?;
@@ -202,7 +202,9 @@ struct RequestText<'a> {
     content: &'a str,
 }
 
-async fn sse_req(rx: Receiver<Arc<Request>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn sse_req(
+    rx: Receiver<Arc<RequestLog>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = stream::unfold(rx, |mut rx| async {
         let req = rx.recv().await.unwrap();
 
@@ -242,43 +244,107 @@ async fn response(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoR
     ResponseText { content }
 }
 
+#[derive(Debug, Clone)]
+pub enum Server<T> {
+    Some(T),
+    Ongoing,
+    Expired,
+}
+
+impl<T> Server<T> {
+    pub fn is_ongoing(&self) -> bool {
+        matches!(self, Self::Ongoing)
+    }
+
+    pub fn map<D>(self, f: impl FnOnce(T) -> D) -> Server<D> {
+        match self {
+            Self::Some(t) => Server::Some(f(t)),
+            Self::Ongoing => Server::Ongoing,
+            Self::Expired => Server::Expired,
+        }
+    }
+
+    pub fn map_display(&self, f: impl FnOnce(&T) -> String) -> String {
+        match self {
+            Self::Some(t) => f(t).to_string(),
+            Self::Ongoing => "ongoing".to_string(),
+            Self::Expired => "cache expired".to_string(),
+        }
+    }
+}
+
+pub struct ResponseLog {
+    body_length: usize,
+    content_type: String,
+}
+
+impl ResponseLog {
+    pub fn parse(buf: &[u8]) -> Self {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut resp = httparse::Response::new(&mut headers);
+        if let Status::Complete(n) = resp.parse(buf).unwrap() {
+            let mut header_map = HeaderMap::new();
+
+            for header in headers.iter().take_while(|h| h != &&httparse::EMPTY_HEADER) {
+                header_map.insert(
+                    header::HeaderName::from_bytes(header.name.as_bytes()).unwrap(),
+                    header::HeaderValue::from_bytes(header.value).unwrap(),
+                );
+            }
+
+            Self {
+                body_length: buf[n..].len(),
+                content_type: header_map
+                    .get(header::CONTENT_TYPE)
+                    .map(|v| v.to_str().unwrap().to_string())
+                    .unwrap_or_else(|| "".to_string()),
+            }
+        } else {
+            todo!()
+        }
+    }
+}
+
+impl Server<ResponseLog> {
+    pub fn body_length(&self) -> String {
+        match self {
+            Server::Some(res) => res.body_length.to_string(),
+            _ => "N/A".to_string(),
+        }
+    }
+
+    pub fn content_type(&self) -> String {
+        match self {
+            Server::Some(res) => res.content_type.clone(),
+            _ => "N/A".to_string(),
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "request_tr.html")]
 struct RequestTR {
-    request: Arc<Request>,
-    response_size: Option<usize>,
+    request: Arc<RequestLog>,
+    response: Server<ResponseLog>,
 }
 
-fn req_to_event(req: Arc<Request>, state: &Proxy) -> Event {
-    let response_size = state
+fn req_to_event(req: Arc<RequestLog>, state: &Proxy) -> Event {
+    let response = state
         .try_response(req.serial)
-        .map(|resp| response_body_size(&resp));
+        .map(|resp| ResponseLog::parse(&resp));
 
     Event::default().event("request").data(replace_cr(
         RequestTR {
             request: req,
-            response_size,
+            response,
         }
         .to_string()
         .as_str(),
     ))
 }
 
-fn response_body_size(response: &[u8]) -> usize {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-
-    if let httparse::Status::Complete(n) = httparse::Response::new(&mut headers)
-        .parse(response)
-        .unwrap()
-    {
-        n
-    } else {
-        0
-    }
-}
-
 async fn request_log(
-    log_chan: Arc<Mutex<LogChan<Arc<Request>>>>,
+    log_chan: Arc<Mutex<LogChan<Arc<RequestLog>>>>,
     state: State<Arc<Proxy>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let state2 = state.clone();
@@ -299,22 +365,22 @@ async fn request_log(
 
 #[derive(Template)]
 #[template(path = "request_log.html")]
-struct RequestLog;
+struct Log;
 
 async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
     let Some(req) = state.request(id) else {
         return "NOT FOUND".to_string();
     };
 
-    let response_size = if let Some(data) = state.response(id).await {
-        Some(response_body_size(&data))
+    let response = if let Some(data) = state.response(id).await {
+        Server::Some(ResponseLog::parse(&data))
     } else {
-        Some(0)
+        Server::Expired
     };
 
     RequestTR {
         request: req,
-        response_size,
+        response,
     }
     .to_string()
 }
