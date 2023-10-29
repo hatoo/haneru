@@ -12,6 +12,7 @@ use futures::{stream, Stream, StreamExt};
 use http::parse_path;
 use hyper::header;
 use rcgen::CertificateParams;
+use sse::replace_cr;
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     net::TcpListener,
@@ -27,6 +28,7 @@ use crate::{log_chan::LogChan, proxy::Proxy};
 mod http;
 mod log_chan;
 mod proxy;
+mod sse;
 
 static ROOT_CERT: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
 async fn root_cert() -> &'static rcgen::Certificate {
@@ -207,15 +209,14 @@ async fn sse_req(rx: Receiver<Arc<Request>>) -> Sse<impl Stream<Item = Result<Ev
         let text =
             String::from_utf8(req.data.clone()).unwrap_or_else(|_| "invalid utf-8".to_string());
         Some((
-            Event::default().event("request").data(
+            Event::default().event("request").data(replace_cr(
                 RequestText {
                     id: req.serial,
                     content: &text,
                 }
                 .to_string()
-                .replace('\r', "&#x0D;")
-                .replace('\n', "&#x0A;"),
-            ),
+                .as_str(),
+            )),
             rx,
         ))
     })
@@ -253,15 +254,14 @@ fn req_to_event(req: Arc<Request>, state: &Proxy) -> Event {
         .try_response(req.serial)
         .map(|resp| response_body_size(&resp));
 
-    Event::default().event("request").data(
+    Event::default().event("request").data(replace_cr(
         RequestTR {
             request: req,
             response_size,
         }
         .to_string()
-        .replace('\r', "&#x0D;")
-        .replace('\n', "&#x0A;"),
-    )
+        .as_str(),
+    ))
 }
 
 fn response_body_size(response: &[u8]) -> usize {
