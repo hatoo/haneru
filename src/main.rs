@@ -174,7 +174,7 @@ impl RequestLog {
         })
     }
 
-    fn timestamp(&self) -> String {
+    pub fn timestamp(&self) -> String {
         self.timestamp.format("%H:%M:%S").to_string()
     }
 }
