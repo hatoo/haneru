@@ -165,24 +165,24 @@ impl ParsedRequest {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         let Status::Complete(n) = req.parse(&data)? else {
-            todo!()
+            anyhow::bail!("invalid request");
         };
         let headers = req
             .headers
             .iter()
             .take_while(|h| h != &&httparse::EMPTY_HEADER)
             .map(|h| {
-                (
-                    HeaderName::from_bytes(h.name.as_bytes()).unwrap(),
-                    HeaderValue::from_bytes(h.value).unwrap(),
-                )
+                Ok((
+                    HeaderName::from_bytes(h.name.as_bytes()).context("invalid header name")?,
+                    HeaderValue::from_bytes(h.value).context("invalid header value")?,
+                ))
             })
-            .collect::<HeaderMap>();
+            .collect::<anyhow::Result<HeaderMap>>()?;
 
         Ok(Self {
-            method: req.method.unwrap().to_string(),
-            path: req.path.unwrap().to_string(),
-            version: req.version.unwrap().to_string(),
+            method: req.method.context("invalid request")?.to_string(),
+            path: req.path.context("invalid request")?.to_string(),
+            version: req.version.context("invalid request")?.to_string(),
             headers,
             body_start: n,
             data,
