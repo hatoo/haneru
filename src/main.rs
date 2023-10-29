@@ -288,7 +288,7 @@ impl ResponseLog {
                 content_type: header_map
                     .get(header::CONTENT_TYPE)
                     .map(|v| v.to_str().unwrap().to_string())
-                    .unwrap_or_else(|| "".to_string()),
+                    .unwrap_or_default(),
             }
         } else {
             todo!()
