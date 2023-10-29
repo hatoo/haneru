@@ -112,7 +112,7 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(|| async { Live }))
-        .route("/log", get(request_log_page))
+        .route("/log", get(|| async { RequestLog }))
         .route("/log/:id", get(request_log_serial))
         .route("/cert", get(cert))
         .route("/response/:id", get(response))
@@ -300,10 +300,6 @@ async fn request_log(
 #[derive(Template)]
 #[template(path = "request_log.html")]
 struct RequestLog;
-
-async fn request_log_page() -> RequestLog {
-    RequestLog
-}
 
 async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
     let Some(req) = state.request(id) else {
