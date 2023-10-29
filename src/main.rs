@@ -91,13 +91,12 @@ async fn main() {
             .unwrap();
     }
     let (tx, _) = broadcast::channel::<Arc<RequestLog>>(128);
-    let txs = tx.clone();
 
-    let state = Arc::new(Proxy::new(tx));
+    let state = Arc::new(Proxy::new(tx.clone()));
 
     let log_chan = Arc::new(Mutex::new(LogChan::default()));
 
-    let mut rx = txs.subscribe();
+    let mut rx = tx.subscribe();
     let lc = log_chan.clone();
     tokio::spawn(async move {
         loop {
@@ -118,7 +117,7 @@ async fn main() {
         .route("/response/:id", get(response))
         .route(
             "/sse/live",
-            get(|| async move { sse_req(txs.subscribe()).await }),
+            get(|| async move { sse_req(tx.subscribe()).await }),
         )
         .route(
             "/sse/log",

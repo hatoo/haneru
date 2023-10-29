@@ -130,7 +130,6 @@ async fn conn_loop<
             format!("{}://{}", scheme, base.host().unwrap()),
             req.clone(),
         );
-        dbg!("here");
 
         if has_upgrade {
             let resp = sniff(client, server).await;
