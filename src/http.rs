@@ -1,11 +1,12 @@
 use anyhow::Context;
 use httparse::Status;
+use hyper::Uri;
 use tokio::io::AsyncReadExt;
 
 fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    match req.parse(&buf) {
+    match req.parse(buf) {
         Ok(Status::Complete(n)) => {
             let body = &buf[n..];
 
@@ -52,7 +53,7 @@ pub async fn read_req<S: AsyncReadExt + Unpin>(
 fn is_response_end(buf: &[u8]) -> anyhow::Result<bool> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut resp = httparse::Response::new(&mut headers);
-    match resp.parse(&buf) {
+    match resp.parse(buf) {
         Ok(Status::Complete(n)) => {
             let body = &buf[n..];
 
@@ -109,4 +110,45 @@ pub async fn read_resp<S: AsyncReadExt + Unpin>(stream: &mut S) -> anyhow::Resul
         }
     }
     Ok(Some(buf))
+}
+
+pub fn parse_path(buf: &[u8]) -> Option<[String; 3]> {
+    let mut i = 0;
+
+    while *buf.get(i)? != b'\r' {
+        i += 1;
+    }
+
+    let first_line = std::str::from_utf8(&buf[..i]).ok()?;
+
+    first_line
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()
+}
+
+pub fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
+    let mut i = 0;
+
+    while *buf.get(i)? != b'\r' {
+        i += 1;
+    }
+
+    let first_line = std::str::from_utf8(&buf[..i]).ok()?;
+
+    let fst = first_line.split_whitespace().collect::<Vec<_>>();
+    let uri = Uri::try_from(fst[1]).ok()?;
+
+    let mut ret = Vec::new();
+
+    ret.extend(fst[0].as_bytes());
+    ret.push(b' ');
+    ret.extend(uri.path_and_query().unwrap().as_str().as_bytes());
+    ret.push(b' ');
+    ret.extend(fst[2].as_bytes());
+    ret.extend(&buf[i..]);
+
+    Some(ret)
 }
