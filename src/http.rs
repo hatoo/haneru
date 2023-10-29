@@ -1,6 +1,7 @@
 use anyhow::Context;
+use axum::http::{HeaderName, HeaderValue};
 use httparse::Status;
-use hyper::Uri;
+use hyper::{HeaderMap, Uri};
 use tokio::io::AsyncReadExt;
 
 fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
@@ -148,4 +149,43 @@ pub fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     ret.extend(&buf[i..]);
 
     Some(ret)
+}
+
+pub struct ParsedRequest {
+    pub method: String,
+    pub path: String,
+    pub version: String,
+    pub headers: HeaderMap,
+    pub body_start: usize,
+    pub data: Vec<u8>,
+}
+
+impl ParsedRequest {
+    pub fn new(data: Vec<u8>) -> anyhow::Result<Self> {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        let Status::Complete(n) = req.parse(&data)? else {
+            todo!()
+        };
+        let headers = req
+            .headers
+            .iter()
+            .take_while(|h| h != &&httparse::EMPTY_HEADER)
+            .map(|h| {
+                (
+                    HeaderName::from_bytes(h.name.as_bytes()).unwrap(),
+                    HeaderValue::from_bytes(h.value).unwrap(),
+                )
+            })
+            .collect::<HeaderMap>();
+
+        Ok(Self {
+            method: req.method.unwrap().to_string(),
+            path: req.path.unwrap().to_string(),
+            version: req.version.unwrap().to_string(),
+            headers,
+            body_start: n,
+            data,
+        })
+    }
 }
