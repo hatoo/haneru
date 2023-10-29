@@ -263,14 +263,6 @@ impl<T> Server<T> {
             Self::Expired => Server::Expired,
         }
     }
-
-    pub fn map_display(&self, f: impl FnOnce(&T) -> String) -> String {
-        match self {
-            Self::Some(t) => f(t).to_string(),
-            Self::Ongoing => "ongoing".to_string(),
-            Self::Expired => "cache expired".to_string(),
-        }
-    }
 }
 
 pub struct ResponseLog {
