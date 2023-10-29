@@ -153,7 +153,7 @@ struct Live;
 #[derive(Debug, Clone)]
 pub struct RequestLog {
     serial: usize,
-    timestamp: std::time::Instant,
+    timestamp: chrono::DateTime<chrono::Local>,
     method: String,
     host: String,
     path: String,
@@ -166,12 +166,16 @@ impl RequestLog {
             parse_path(&data).context("failed to parse the first line")?;
         Ok(Self {
             serial,
-            timestamp: std::time::Instant::now(),
+            timestamp: chrono::Local::now(),
             method,
             host,
             path,
             data,
         })
+    }
+
+    fn timestamp(&self) -> String {
+        self.timestamp.format("%H:%M:%S").to_string()
     }
 }
 
