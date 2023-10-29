@@ -60,9 +60,8 @@ fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
     cert_params
         .extended_key_usages
         .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
-    let cert = rcgen::Certificate::from_params(cert_params).unwrap();
 
-    cert
+    rcgen::Certificate::from_params(cert_params).unwrap()
 }
 
 #[derive(clap::Parser)]
@@ -162,7 +161,7 @@ pub struct Request {
 
 impl Request {
     fn new(serial: usize, host: String, data: Vec<u8>) -> anyhow::Result<Self> {
-        let [method, path, version] =
+        let [method, path, _version] =
             parse_path(&data).context("failed to parse the first line")?;
         Ok(Self {
             serial,
@@ -180,7 +179,7 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
 
     let tcp_listener = TcpListener::bind(addr)
         .await
-        .expect(&format!("failed to bind {}", &addr));
+        .unwrap_or_else(|_| panic!("failed to bind {}", &addr));
     println!("HTTP Proxy is Listening on http://{}/", addr);
 
     loop {
@@ -214,8 +213,8 @@ async fn sse_req(rx: Receiver<Arc<Request>>) -> Sse<impl Stream<Item = Result<Ev
                     content: &text,
                 }
                 .to_string()
-                .replace("\r", "&#x0D;")
-                .replace("\n", "&#x0A;"),
+                .replace('\r', "&#x0D;")
+                .replace('\n', "&#x0A;"),
             ),
             rx,
         ))
@@ -260,8 +259,8 @@ fn req_to_event(req: Arc<Request>, state: &Proxy) -> Event {
             response_size,
         }
         .to_string()
-        .replace("\r", "&#x0D;")
-        .replace("\n", "&#x0A;"),
+        .replace('\r', "&#x0D;")
+        .replace('\n', "&#x0A;"),
     )
 }
 
