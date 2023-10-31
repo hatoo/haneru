@@ -110,9 +110,10 @@ async fn main() {
     // build our application with a route
     let app = Router::new()
         .route("/", get(|| async { Live }))
+        .route("/cert", get(cert))
         .route("/log", get(|| async { LogHtml }))
         .route("/log/:id", get(request_log_serial))
-        .route("/cert", get(cert))
+        .route("/detail/:id", get(detail))
         .route("/response/:id", get(response))
         .route(
             "/sse/live",
@@ -371,4 +372,18 @@ async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> 
         response,
     }
     .to_string()
+}
+
+#[derive(Template)]
+#[template(path = "detail.html")]
+struct DetailHtml {
+    request: String,
+}
+
+async fn detail(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> DetailHtml {
+    let request = state.request(id);
+    let request = request
+        .map(|r| String::from_utf8_lossy(r.parsed_request.data.as_slice()).to_string())
+        .unwrap_or_default();
+    DetailHtml { request }
 }

@@ -2,7 +2,8 @@
 {% let response_size = response.body_length() %}
 {% let content_type = response.content_type() %}
 
-<tr {% if is_ongoing %} hx-trigger="load" hx-swap="outerHTML" hx-get="/log/{{request.serial}}" {% endif %}>
+<tr {% if is_ongoing %} hx-trigger="load" hx-swap="outerHTML" hx-get="/log/{{request.serial}}" {% endif %}
+    onclick="htmx.ajax('GET', '/detail/{{request.serial}}', '#detail')">
     <td>{{request.serial}}</td>
     <td>{{request.timestamp()}}</td>
     <td>{{request.host}}</td>
