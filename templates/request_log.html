@@ -4,21 +4,19 @@
 Log
 {% endblock subtitle %}
 {% block content %}
-<div>
-    <table>
-        <thead>
-            <tr>
-                <th>Serial</th>
-                <th>Timestamp</th>
-                <th>Host</th>
-                <th>Method</th>
-                <th>URL</th>
-                <th>Length</th>
-                <th>Content-Type</th>
-            </tr>
-        </thead>
-        <tbody hx-ext="sse" sse-connect="/sse/log" sse-swap="request" hx-swap="beforeend">
-        </tbody>
-    </table>
-</div>
+<table>
+    <thead>
+        <tr>
+            <th>Serial</th>
+            <th>Timestamp</th>
+            <th>Host</th>
+            <th>Method</th>
+            <th>URL</th>
+            <th>Length</th>
+            <th>Content-Type</th>
+        </tr>
+    </thead>
+    <tbody hx-ext="sse" sse-connect="/sse/log" sse-swap="request" hx-swap="beforeend">
+    </tbody>
+</table>
 {% endblock content %}
