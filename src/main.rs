@@ -186,7 +186,7 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = proxy::proxy(stream, state).await {
-                eprintln!("Error: {}", err);
+                eprintln!("Error: {:?}", err);
             }
         });
     }
