@@ -6,8 +6,8 @@
     <td>{{request.serial}}</td>
     <td>{{request.timestamp()}}</td>
     <td>{{request.host}}</td>
-    <td>{{request.method}}</td>
-    <td>{{request.path}}</td>
+    <td>{{request.parsed_request.method}}</td>
+    <td>{{request.parsed_request.path}}</td>
     <td>{{response_size}}</td>
     <td>{{content_type}}</td>
 </tr>

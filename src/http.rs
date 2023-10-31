@@ -151,6 +151,7 @@ pub fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     Some(ret)
 }
 
+#[derive(Debug, Clone)]
 pub struct ParsedRequest {
     pub method: String,
     pub path: String,

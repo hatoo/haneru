@@ -1,4 +1,3 @@
-use anyhow::Context;
 use askama::Template;
 use askama_axum::IntoResponse;
 use axum::{
@@ -9,7 +8,7 @@ use axum::{
 };
 use clap::Parser;
 use futures::{stream, Stream, StreamExt};
-use http::parse_path;
+use http::ParsedRequest;
 use httparse::Status;
 use hyper::{header, HeaderMap};
 use rcgen::CertificateParams;
@@ -111,7 +110,7 @@ async fn main() {
     // build our application with a route
     let app = Router::new()
         .route("/", get(|| async { Live }))
-        .route("/log", get(|| async { Log }))
+        .route("/log", get(|| async { LogHtml }))
         .route("/log/:id", get(request_log_serial))
         .route("/cert", get(cert))
         .route("/response/:id", get(response))
@@ -154,23 +153,17 @@ struct Live;
 pub struct RequestLog {
     serial: usize,
     timestamp: chrono::DateTime<chrono::Local>,
-    method: String,
     host: String,
-    path: String,
-    data: Vec<u8>,
+    parsed_request: ParsedRequest,
 }
 
 impl RequestLog {
     fn new(serial: usize, host: String, data: Vec<u8>) -> anyhow::Result<Self> {
-        let [method, path, _version] =
-            parse_path(&data).context("failed to parse the first line")?;
         Ok(Self {
             serial,
             timestamp: chrono::Local::now(),
-            method,
             host,
-            path,
-            data,
+            parsed_request: ParsedRequest::new(data)?,
         })
     }
 
@@ -200,7 +193,7 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
 
 #[derive(Template)]
 #[template(path = "request.html")]
-struct RequestText<'a> {
+struct RequestHtml<'a> {
     id: usize,
     content: &'a str,
 }
@@ -211,11 +204,11 @@ async fn sse_req(
     let stream = stream::unfold(rx, |mut rx| async {
         let req = rx.recv().await.unwrap();
 
-        let text =
-            String::from_utf8(req.data.clone()).unwrap_or_else(|_| "invalid utf-8".to_string());
+        let text = String::from_utf8(req.parsed_request.data.clone())
+            .unwrap_or_else(|_| "invalid utf-8".to_string());
         Some((
             Event::default().event("request").data(replace_cr(
-                RequestText {
+                RequestHtml {
                     id: req.serial,
                     content: &text,
                 }
@@ -232,19 +225,19 @@ async fn sse_req(
 
 #[derive(Template)]
 #[template(path = "response.html")]
-struct ResponseText {
+struct ResponseHtml {
     content: String,
 }
 async fn response(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
     let Some(resp) = state.response(id).await else {
-        return ResponseText {
+        return ResponseHtml {
             content: "Not Found".to_string(),
         };
     };
     let content = String::from_utf8(resp.as_ref().clone())
         .unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
 
-    ResponseText { content }
+    ResponseHtml { content }
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +311,7 @@ impl Server<ResponseLog> {
 
 #[derive(Template)]
 #[template(path = "request_tr.html")]
-struct RequestTR {
+struct RequestTrHtml {
     request: Arc<RequestLog>,
     response: Server<ResponseLog>,
 }
@@ -329,7 +322,7 @@ fn req_to_event(req: Arc<RequestLog>, state: &Proxy) -> Event {
         .map(|resp| ResponseLog::parse(&resp));
 
     Event::default().event("request").data(replace_cr(
-        RequestTR {
+        RequestTrHtml {
             request: req,
             response,
         }
@@ -360,7 +353,7 @@ async fn request_log(
 
 #[derive(Template)]
 #[template(path = "request_log.html")]
-struct Log;
+struct LogHtml;
 
 async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
     let Some(req) = state.request(id) else {
@@ -373,7 +366,7 @@ async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> 
         Server::Expired
     };
 
-    RequestTR {
+    RequestTrHtml {
         request: req,
         response,
     }
