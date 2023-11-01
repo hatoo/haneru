@@ -88,13 +88,8 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
         let cell = state.new_req(format!("http://{}", uri.host().unwrap()), buf.clone());
-        let mut server = TcpStream::connect(format!(
-            "{}:{}",
-            uri.host().unwrap(),
-            uri.port_u16().unwrap_or(80)
-        ))
-        .await
-        .unwrap();
+        let mut server =
+            TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
 
         server.write_all(buf.as_ref()).await?;
 
@@ -192,7 +187,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     uri: Uri,
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
-    let cert = make_cert(vec![uri.host().unwrap().to_string()]);
+    let cert = make_cert(vec![uri.host().context("no host on path")?.to_string()]);
     let signed = cert.serialize_der_with_signer(root_cert().await)?;
     let private_key = cert.get_key_pair().serialize_der();
     let server_config = ServerConfig::builder()
