@@ -12,6 +12,7 @@ use http::ParsedRequest;
 use httparse::Status;
 use hyper::{header, HeaderMap};
 use rcgen::CertificateParams;
+use sqlx::{Connection, SqliteConnection, SqlitePool};
 use sse::replace_cr;
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
@@ -25,6 +26,7 @@ use tower_http::services::ServeDir;
 
 use crate::{log_chan::LogChan, proxy::Proxy};
 
+mod db;
 mod http;
 mod log_chan;
 mod proxy;
@@ -89,9 +91,11 @@ async fn main() {
             .map_err(|_| anyhow::anyhow!("failed to set root cert"))
             .unwrap();
     }
-    let (tx, _) = broadcast::channel::<Arc<RequestLog>>(128);
+    let (tx, _) = broadcast::channel::<i64>(128);
 
-    let state = Arc::new(Proxy::new(tx.clone()));
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    db::add_schema(&pool).await.unwrap();
+    let state = Arc::new(Proxy::new(tx.clone(), pool));
 
     let log_chan = Arc::new(Mutex::new(LogChan::default()));
 
@@ -115,13 +119,10 @@ async fn main() {
         .route("/log/:id", get(request_log_serial))
         .route("/detail/:id", get(detail))
         .route("/response/:id", get(response))
-        .route(
-            "/sse/live",
-            get(|| async move { sse_req(tx.subscribe()).await }),
-        )
+        .route("/sse/live", get(sse_req))
         .route(
             "/sse/log",
-            get(|state| async move { request_log(log_chan.clone(), state).await }),
+            get(|state| async move { request_log(state).await }),
         )
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state_app);
@@ -195,28 +196,29 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
 #[derive(Template)]
 #[template(path = "request.html")]
 struct RequestHtml<'a> {
-    id: usize,
+    id: i64,
     content: &'a str,
 }
 
-async fn sse_req(
-    rx: Receiver<Arc<RequestLog>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = stream::unfold(rx, |mut rx| async {
-        let req = rx.recv().await.unwrap();
+async fn sse_req(state: State<Arc<Proxy>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.tx.subscribe();
+    let state = state.0.clone();
+    let stream = stream::unfold((rx, state), |(mut rx, state)| async {
+        let id = rx.recv().await.unwrap();
+        let req = state.request(id).await.unwrap().unwrap();
 
-        let text = String::from_utf8(req.parsed_request.data.clone())
-            .unwrap_or_else(|_| "invalid utf-8".to_string());
+        let text =
+            String::from_utf8(req.data.clone()).unwrap_or_else(|_| "invalid utf-8".to_string());
         Some((
             Event::default().event("request").data(replace_cr(
                 RequestHtml {
-                    id: req.serial,
+                    id: req.id,
                     content: &text,
                 }
                 .to_string()
                 .as_str(),
             )),
-            rx,
+            (rx, state),
         ))
     })
     .map(Ok);
@@ -229,7 +231,7 @@ async fn sse_req(
 struct ResponseHtml {
     content: String,
 }
-async fn response(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
+async fn response(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
     let Some(resp) = state.response(id).await else {
         return ResponseHtml {
             content: "Not Found".to_string(),
@@ -313,13 +315,13 @@ impl Server<ResponseLog> {
 #[derive(Template)]
 #[template(path = "request_tr.html")]
 struct RequestTrHtml {
-    request: Arc<RequestLog>,
+    request: db::Request,
     response: Server<ResponseLog>,
 }
 
-fn req_to_event(req: Arc<RequestLog>, state: &Proxy) -> Event {
+fn req_to_event(req: db::Request, state: &Proxy) -> Event {
     let response = state
-        .try_response(req.serial)
+        .try_response(req.id)
         .map(|resp| ResponseLog::parse(&resp));
 
     Event::default().event("request").data(replace_cr(
@@ -333,16 +335,16 @@ fn req_to_event(req: Arc<RequestLog>, state: &Proxy) -> Event {
 }
 
 async fn request_log(
-    log_chan: Arc<Mutex<LogChan<Arc<RequestLog>>>>,
     state: State<Arc<Proxy>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let state2 = state.clone();
-    let (log, rx) = log_chan.lock().await.now_and_future();
+    let (log, rx) = state.now_and_future().await.unwrap();
     let stream = stream::iter(log.into_iter().map(move |req| req_to_event(req, &state)))
         .chain(stream::unfold(
             (rx, state2),
             move |(mut rx, state)| async move {
-                let req = rx.recv().await.unwrap();
+                let id = rx.recv().await.unwrap();
+                let req = state.request(id).await.unwrap().unwrap();
 
                 Some((req_to_event(req, &state), (rx, state)))
             },
@@ -356,8 +358,8 @@ async fn request_log(
 #[template(path = "request_log.html")]
 struct LogHtml;
 
-async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
-    let Some(req) = state.request(id) else {
+async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
+    let Ok(Some(req)) = state.request(id).await else {
         return "NOT FOUND".to_string();
     };
 
@@ -380,10 +382,10 @@ struct DetailHtml {
     request: String,
 }
 
-async fn detail(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> DetailHtml {
-    let request = state.request(id);
+async fn detail(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> DetailHtml {
+    let request = state.request(id).await.unwrap();
     let request = request
-        .map(|r| String::from_utf8_lossy(r.parsed_request.data.as_slice()).to_string())
+        .map(|r| String::from_utf8_lossy(r.data.as_slice()).to_string())
         .unwrap_or_default();
     DetailHtml { request }
 }

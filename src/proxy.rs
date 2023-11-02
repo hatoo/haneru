@@ -6,36 +6,44 @@ use axum::http::uri;
 use hyper::Uri;
 use moka::sync::Cache;
 use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
+use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::broadcast::Sender,
+    sync::broadcast::{self, Sender},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::{
-    http::{parse_path, read_req, read_resp, replace_path},
+    db,
+    http::{parse_path, read_req, read_resp, replace_path, ParsedRequest},
     make_cert, root_cert, RequestLog, Server,
 };
 
 pub struct Proxy {
-    tx: Sender<Arc<RequestLog>>,
-    serial_counter: AtomicUsize,
-    response_map: Cache<usize, Arc<AsyncCell<Arc<Vec<u8>>>>>,
-    request_map: Cache<usize, Arc<RequestLog>>,
+    pub tx: Sender<i64>,
+    response_map: Cache<i64, Arc<AsyncCell<Arc<Vec<u8>>>>>,
+    // request_map: Cache<usize, Arc<RequestLog>>,
+    pool: SqlitePool,
 }
 
 impl Proxy {
-    pub fn new(tx: Sender<Arc<RequestLog>>) -> Self {
+    pub fn new(tx: Sender<i64>, pool: SqlitePool) -> Self {
         Self {
             tx,
-            serial_counter: AtomicUsize::new(1),
             response_map: Cache::new(2048),
-            request_map: Cache::new(2048),
+            // request_map: Cache::new(2048),
+            pool,
         }
     }
 
-    pub fn new_req(&self, host: String, req: Vec<u8>) -> Arc<AsyncCell<Arc<Vec<u8>>>> {
+    pub async fn new_req(
+        &self,
+        scheme: &str,
+        host: &str,
+        req: &[u8],
+    ) -> anyhow::Result<Arc<AsyncCell<Arc<Vec<u8>>>>> {
+        /*
         let id = self
             .serial_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -45,19 +53,31 @@ impl Proxy {
         self.response_map.insert(id, cell.clone());
         self.request_map.insert(id, req);
         cell
+        */
+
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut parser = httparse::Request::new(&mut headers);
+        parser.parse(req)?;
+
+        let id = db::save_request(&self.pool, parser.method.unwrap(), scheme, host, req).await?;
+        let _ = self.tx.send(id);
+
+        let cell = Arc::new(AsyncCell::default());
+        self.response_map.insert(id, cell.clone());
+        Ok(cell)
     }
 
-    pub fn request(&self, serial: usize) -> Option<Arc<RequestLog>> {
-        self.request_map.get(&serial)
+    pub async fn request(&self, id: i64) -> sqlx::Result<Option<db::Request>> {
+        db::get_request(&self.pool, id).await
     }
 
-    pub async fn response(&self, serial: usize) -> Option<Arc<Vec<u8>>> {
+    pub async fn response(&self, serial: i64) -> Option<Arc<Vec<u8>>> {
         let cell = self.response_map.get(&serial)?;
         let resp = cell.get().await;
         Some(resp)
     }
 
-    pub fn try_response(&self, serial: usize) -> Server<Arc<Vec<u8>>> {
+    pub fn try_response(&self, serial: i64) -> Server<Arc<Vec<u8>>> {
         if let Some(cell) = self.response_map.get(&serial) {
             if let Some(resp) = cell.try_get() {
                 Server::Some(resp)
@@ -67,6 +87,29 @@ impl Proxy {
         } else {
             Server::Expired
         }
+    }
+
+    pub async fn now_and_future(
+        &self,
+    ) -> anyhow::Result<(Vec<db::Request>, broadcast::Receiver<i64>)> {
+        let mut now = db::get_all_request(&self.pool).await?;
+        let mut rx = self.tx.subscribe();
+
+        if let Some(last) = now.last() {
+            let last_id = last.id;
+            loop {
+                if let Ok(next) = rx.try_recv() {
+                    if next > last_id {
+                        now.push(db::get_request(&self.pool, next).await?.unwrap());
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok((now, rx))
     }
 }
 
@@ -87,7 +130,7 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
-        let cell = state.new_req(format!("http://{}", uri.host().unwrap()), buf.clone());
+        let cell = state.new_req("http://", uri.host().unwrap(), &buf).await?;
         let mut server =
             TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
 
@@ -121,10 +164,9 @@ async fn conn_loop<
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
-        let cell = state.new_req(
-            format!("{}://{}", scheme, base.host().unwrap()),
-            req.clone(),
-        );
+        let cell = state
+            .new_req(&format!("{}://", scheme), base.host().unwrap(), &req)
+            .await?;
 
         if has_upgrade {
             let resp = sniff(client, server).await;

@@ -1,3 +1,4 @@
+{#
 {% let is_ongoing = response.is_ongoing() %}
 {% let response_size = response.body_length() %}
 {% let content_type = response.content_type() %}
@@ -11,4 +12,8 @@
     <td>{{request.parsed_request.path}}</td>
     <td>{{response_size}}</td>
     <td>{{content_type}}</td>
+</tr>
+#}
+<tr>
+    <td>{{request.id}}</td>
 </tr>
