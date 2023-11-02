@@ -24,11 +24,10 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-use crate::{log_chan::LogChan, proxy::Proxy};
+use crate::proxy::Proxy;
 
 mod db;
 mod http;
-mod log_chan;
 mod proxy;
 mod sse;
 
@@ -96,19 +95,6 @@ async fn main() {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::add_schema(&pool).await.unwrap();
     let state = Arc::new(Proxy::new(tx.clone(), pool));
-
-    let log_chan = Arc::new(Mutex::new(LogChan::default()));
-
-    let mut rx = tx.subscribe();
-    let lc = log_chan.clone();
-    tokio::spawn(async move {
-        loop {
-            let req = rx.recv().await.unwrap();
-
-            let mut lock = lc.lock().await;
-            lock.push(req.clone());
-        }
-    });
 
     let state_app = state.clone();
     // build our application with a route
