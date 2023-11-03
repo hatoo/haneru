@@ -92,8 +92,8 @@ impl Proxy {
     pub async fn now_and_future(
         &self,
     ) -> anyhow::Result<(Vec<db::Request>, broadcast::Receiver<i64>)> {
-        let mut now = db::get_all_request(&self.pool).await?;
         let mut rx = self.tx.subscribe();
+        let mut now = db::get_all_request(&self.pool).await?;
 
         if let Some(last) = now.last() {
             let last_id = last.id;
