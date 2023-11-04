@@ -241,6 +241,12 @@ impl Q {
     }
 }
 
+#[derive(Template)]
+#[template(path = "blank_request.html")]
+struct BlankRequestHtml {
+    id: i64,
+    q: Q,
+}
 async fn request_log(
     state: State<Arc<Proxy>>,
     query: Query<Q>,
@@ -261,16 +267,23 @@ async fn request_log(
             .chain(stream::unfold(
                 (rx, state2, query),
                 move |(mut rx, state, query)| async move {
-                    let req = loop {
-                        let id = rx.recv().await.unwrap();
-                        let req = state.request(id, query.q.as_deref()).await.unwrap();
+                    let id = rx.recv().await.unwrap();
+                    let req = state.request(id, query.q.as_deref()).await.unwrap();
 
-                        if let Some(req) = req {
-                            break req;
-                        }
-                    };
-
-                    Some((req_to_event(req, &state).await.unwrap(), (rx, state, query)))
+                    if let Some(req) = req {
+                        Some((req_to_event(req, &state).await.unwrap(), (rx, state, query)))
+                    } else {
+                        Some((
+                            Event::default().event("request").data(replace_cr(
+                                &BlankRequestHtml {
+                                    id,
+                                    q: query.0.clone(),
+                                }
+                                .to_string(),
+                            )),
+                            (rx, state, query),
+                        ))
+                    }
                 },
             ))
             .map(Ok);
@@ -287,13 +300,17 @@ struct LogHtml {
     q: Q,
 }
 
-async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
-    let Ok(Some(req)) = state.request(id, None).await else {
+async fn request_log_serial(
+    Path(id): Path<i64>,
+    Query(q): Query<Q>,
+    state: State<Arc<Proxy>>,
+) -> impl IntoResponse {
+    let Ok(response) = state.response(id).await else {
         return "NOT FOUND".to_string();
     };
 
-    let Ok(response) = state.response(id).await else {
-        return "NOT FOUND".to_string();
+    let Ok(Some(req)) = state.request(id, q.q.as_deref()).await else {
+        return "".to_string();
     };
 
     RequestTrHtml {
