@@ -1,3 +1,4 @@
+use anyhow::Context;
 use askama::Template;
 use askama_axum::IntoResponse;
 use axum::{
@@ -92,13 +93,14 @@ async fn main() {
             .map_err(|_| anyhow::anyhow!("failed to set root cert"))
             .unwrap();
     }
-    let (tx, _) = broadcast::channel::<i64>(128);
+    let (request_tx, _) = broadcast::channel::<i64>(128);
+    let (response_tx, _) = broadcast::channel::<i64>(128);
 
     let pool = SqlitePool::connect(&format!("sqlite:{}", &args.sqlite3))
         .await
         .unwrap();
     db::add_schema(&pool).await.unwrap();
-    let state = Arc::new(Proxy::new(tx.clone(), pool));
+    let state = Arc::new(Proxy::new(request_tx.clone(), response_tx.clone(), pool));
 
     let state_app = state.clone();
     // build our application with a route
@@ -191,7 +193,7 @@ struct RequestHtml<'a> {
 }
 
 async fn sse_req(state: State<Arc<Proxy>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.tx.subscribe();
+    let rx = state.request_tx.subscribe();
     let state = state.0.clone();
     let stream = stream::unfold((rx, state), |(mut rx, state)| async {
         let id = rx.recv().await.unwrap();
@@ -222,13 +224,13 @@ struct ResponseHtml {
     content: String,
 }
 async fn response(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
-    let Some(resp) = state.response(id).await else {
+    let Ok(resp) = state.response(id).await else {
         return ResponseHtml {
             content: "Not Found".to_string(),
         };
     };
-    let content = String::from_utf8(resp.as_ref().clone())
-        .unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
+    let content =
+        String::from_utf8(resp.data).unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
 
     ResponseHtml { content }
 }
@@ -306,18 +308,14 @@ impl Server<ResponseLog> {
 #[template(path = "request_tr.html")]
 struct RequestTrHtml {
     request: db::Request,
-    response: Server<ResponseLog>,
+    response: Option<ResponseLog>,
 }
 
 fn req_to_event(req: db::Request, state: &Proxy) -> Event {
-    let response = state
-        .try_response(req.id)
-        .map(|resp| ResponseLog::parse(&resp));
-
     Event::default().event("request").data(replace_cr(
         RequestTrHtml {
             request: req,
-            response,
+            response: None,
         }
         .to_string()
         .as_str(),
@@ -353,15 +351,13 @@ async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> im
         return "NOT FOUND".to_string();
     };
 
-    let response = if let Some(data) = state.response(id).await {
-        Server::Some(ResponseLog::parse(&data))
-    } else {
-        Server::Expired
+    let Ok(response) = state.response(id).await else {
+        return "NOT FOUND".to_string();
     };
 
     RequestTrHtml {
         request: req,
-        response,
+        response: Some(ResponseLog::parse(&response.data)),
     }
     .to_string()
 }

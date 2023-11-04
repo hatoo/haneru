@@ -21,39 +21,21 @@ use crate::{
 };
 
 pub struct Proxy {
-    pub tx: Sender<i64>,
-    response_map: Cache<i64, Arc<AsyncCell<Arc<Vec<u8>>>>>,
+    pub request_tx: Sender<i64>,
+    pub response_tx: Sender<i64>,
     pool: SqlitePool,
 }
 
 impl Proxy {
-    pub fn new(tx: Sender<i64>, pool: SqlitePool) -> Self {
+    pub fn new(request_tx: Sender<i64>, response_tx: Sender<i64>, pool: SqlitePool) -> Self {
         Self {
-            tx,
-            response_map: Cache::new(2048),
-            // request_map: Cache::new(2048),
+            request_tx,
+            response_tx,
             pool,
         }
     }
 
-    pub async fn new_req(
-        &self,
-        scheme: &str,
-        host: &str,
-        req: &[u8],
-    ) -> anyhow::Result<Arc<AsyncCell<Arc<Vec<u8>>>>> {
-        /*
-        let id = self
-            .serial_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let req = Arc::new(RequestLog::new(id, host, req).unwrap());
-        let _ = self.tx.send(req.clone());
-        let cell = Arc::new(AsyncCell::default());
-        self.response_map.insert(id, cell.clone());
-        self.request_map.insert(id, req);
-        cell
-        */
-
+    pub async fn new_req(&self, scheme: &str, host: &str, req: &[u8]) -> anyhow::Result<i64> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut parser = httparse::Request::new(&mut headers);
         parser.parse(req)?;
@@ -81,39 +63,34 @@ impl Proxy {
             req,
         )
         .await?;
-        let _ = self.tx.send(id);
+        let _ = self.request_tx.send(id);
 
-        let cell = Arc::new(AsyncCell::default());
-        self.response_map.insert(id, cell.clone());
-        Ok(cell)
+        Ok(id)
     }
 
     pub async fn request(&self, id: i64) -> sqlx::Result<Option<db::Request>> {
         db::get_request(&self.pool, id).await
     }
 
-    pub async fn response(&self, serial: i64) -> Option<Arc<Vec<u8>>> {
-        let cell = self.response_map.get(&serial)?;
-        let resp = cell.get().await;
-        Some(resp)
+    pub async fn response(&self, id: i64) -> anyhow::Result<db::Response> {
+        let mut rx = self.response_tx.subscribe();
+
+        if let Some(res) = db::get_response(&self.pool, id).await? {
+            Ok(res)
+        } else {
+            while rx.recv().await? != id {}
+            Ok(db::get_response(&self.pool, id).await?.unwrap())
+        }
     }
 
-    pub fn try_response(&self, serial: i64) -> Server<Arc<Vec<u8>>> {
-        if let Some(cell) = self.response_map.get(&serial) {
-            if let Some(resp) = cell.try_get() {
-                Server::Some(resp)
-            } else {
-                Server::Ongoing
-            }
-        } else {
-            Server::Expired
-        }
+    pub async fn try_response(&self, id: i64) -> sqlx::Result<Option<db::Response>> {
+        db::get_response(&self.pool, id).await
     }
 
     pub async fn now_and_future(
         &self,
     ) -> anyhow::Result<(Vec<db::Request>, broadcast::Receiver<i64>)> {
-        let mut rx = self.tx.subscribe();
+        let mut rx = self.request_tx.subscribe();
         let mut now = db::get_all_request(&self.pool).await?;
 
         if let Some(last) = now.last() {
@@ -151,7 +128,7 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
-        let cell = state.new_req("http", uri.host().unwrap(), &buf).await?;
+        let id = state.new_req("http", uri.host().unwrap(), &buf).await?;
         let mut server =
             TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
 
@@ -159,12 +136,13 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
         if has_upgrade {
             let resp = sniff(stream, server).await;
-            cell.set(Arc::new(resp));
+            db::save_response(&state.pool, id, &resp).await?;
+            let _ = state.response_tx.send(id);
         } else {
             let resp = read_resp(&mut server).await?.context("no resp")?;
             stream.write_all(resp.as_ref()).await?;
-            cell.set(Arc::new(resp));
-
+            db::save_response(&state.pool, id, &resp).await?;
+            let _ = state.response_tx.send(id);
             conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
         };
     }
@@ -185,19 +163,21 @@ async fn conn_loop<
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
-        let cell = state
+        let id = state
             .new_req(scheme.as_str(), base.host().unwrap(), &req)
             .await?;
 
         if has_upgrade {
             let resp = sniff(client, server).await;
-            cell.set(Arc::new(resp));
+            db::save_response(&state.pool, id, &resp).await?;
+            let _ = state.response_tx.send(id);
             break;
         } else {
             server.write_all(&req).await?;
             let resp = read_resp(&mut server).await?.context("no resp")?;
             client.write_all(&resp).await?;
-            cell.set(Arc::new(resp));
+            db::save_response(&state.pool, id, &resp).await?;
+            let _ = state.response_tx.send(id);
         }
     }
     Ok(())

@@ -34,6 +34,12 @@ struct Req {
     pub data: Vec<u8>,
 }
 
+#[derive(sqlx::FromRow)]
+pub struct Response {
+    pub id: i64,
+    pub data: Vec<u8>,
+}
+
 pub async fn add_schema(executor: impl Executor<'_, Database = Sqlite>) -> sqlx::Result<()> {
     sqlx::query(SCHEMA_SQL).execute(executor).await?;
     Ok(())
@@ -177,4 +183,26 @@ pub async fn get_all_request(
     }
 
     Ok(map.into_values().collect())
+}
+
+pub async fn get_response(
+    executor: impl Executor<'_, Database = Sqlite> + Clone,
+    id: i64,
+) -> sqlx::Result<Option<Response>> {
+    let resp = sqlx::query_as!(Response, "SELECT id, data FROM responses WHERE id = ?", id,)
+        .fetch_optional(executor)
+        .await?;
+
+    Ok(resp)
+}
+
+pub async fn save_response(
+    executor: impl Executor<'_, Database = Sqlite> + Clone,
+    id: i64,
+    data: &[u8],
+) -> sqlx::Result<()> {
+    sqlx::query!("INSERT INTO responses (id, data) VALUES (?, ?)", id, data)
+        .execute(executor)
+        .await?;
+    Ok(())
 }
