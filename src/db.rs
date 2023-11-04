@@ -65,7 +65,7 @@ pub async fn save_request(
 
     for (k, v) in headers {
         sqlx::query!(
-            "INSERT INTO headers (request_id, key, value) VALUES (?, ?, ?)",
+            "INSERT INTO request_headers (request_id, key, value) VALUES (?, ?, ?)",
             id,
             k,
             v
@@ -101,7 +101,7 @@ pub async fn get_request(
         }
         let headers = sqlx::query_as!(
             Header,
-            "SELECT key, value FROM headers WHERE request_id = ?",
+            "SELECT key, value FROM request_headers WHERE request_id = ?",
             id,
         )
         .fetch_all(executor)
@@ -165,7 +165,8 @@ pub async fn get_all_request(
         pub value: String,
     }
     let mut headers =
-        sqlx::query_as!(Header, "SELECT request_id, key, value FROM headers",).fetch(executor);
+        sqlx::query_as!(Header, "SELECT request_id, key, value FROM request_headers",)
+            .fetch(executor);
 
     while let Some(h) = headers.next().await {
         let h = h?;
