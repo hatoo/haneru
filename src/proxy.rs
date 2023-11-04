@@ -23,7 +23,6 @@ use crate::{
 pub struct Proxy {
     pub tx: Sender<i64>,
     response_map: Cache<i64, Arc<AsyncCell<Arc<Vec<u8>>>>>,
-    // request_map: Cache<usize, Arc<RequestLog>>,
     pool: SqlitePool,
 }
 

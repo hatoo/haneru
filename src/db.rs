@@ -65,7 +65,7 @@ pub async fn save_request(
 
     for (k, v) in headers {
         sqlx::query!(
-            "INSERT INTO request_headers (request_id, key, value) VALUES (?, ?, ?)",
+            "INSERT INTO request_headers (request_id, name, value) VALUES (?, ?, ?)",
             id,
             k,
             v
@@ -90,18 +90,14 @@ pub async fn get_request(
     .fetch_optional(executor.clone())
     .await?;
 
-    struct Header {
-        pub key: String,
-        pub value: String,
-    }
     if let Some(req) = req {
         struct Header {
-            pub key: String,
+            pub name: String,
             pub value: String,
         }
         let headers = sqlx::query_as!(
             Header,
-            "SELECT key, value FROM request_headers WHERE request_id = ?",
+            "SELECT name, value FROM request_headers WHERE request_id = ?",
             id,
         )
         .fetch_all(executor)
@@ -119,7 +115,7 @@ pub async fn get_request(
                 .into_iter()
                 .map(|h| {
                     (
-                        HeaderName::from_bytes(h.key.as_bytes()).unwrap(),
+                        HeaderName::from_bytes(h.name.as_bytes()).unwrap(),
                         h.value.parse().unwrap(),
                     )
                 })
@@ -161,18 +157,20 @@ pub async fn get_all_request(
 
     struct Header {
         pub request_id: i64,
-        pub key: String,
+        pub name: String,
         pub value: String,
     }
-    let mut headers =
-        sqlx::query_as!(Header, "SELECT request_id, key, value FROM request_headers",)
-            .fetch(executor);
+    let mut headers = sqlx::query_as!(
+        Header,
+        "SELECT request_id, name, value FROM request_headers",
+    )
+    .fetch(executor);
 
     while let Some(h) = headers.next().await {
         let h = h?;
         if let Some(hs) = map.get_mut(&h.request_id) {
             hs.headers.insert(
-                HeaderName::from_bytes(h.key.as_bytes()).unwrap(),
+                HeaderName::from_bytes(h.name.as_bytes()).unwrap(),
                 h.value.parse().unwrap(),
             );
         }
