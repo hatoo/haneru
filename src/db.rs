@@ -1,4 +1,12 @@
-use sqlx::{Executor, Sqlite};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::DerefMut,
+};
+
+use axum::http::HeaderName;
+use futures::StreamExt;
+use hyper::HeaderMap;
+use sqlx::{Connection, Executor, Sqlite};
 
 const SCHEMA_SQL: &str = include_str!("../schema.sql");
 
@@ -6,9 +14,23 @@ const SCHEMA_SQL: &str = include_str!("../schema.sql");
 pub struct Request {
     pub id: i64,
     pub timestamp: String,
-    pub method: String,
     pub scheme: String,
     pub host: String,
+    pub method: String,
+    pub path: String,
+    pub version: String,
+    pub headers: HeaderMap,
+    pub data: Vec<u8>,
+}
+
+struct Req {
+    pub id: i64,
+    pub timestamp: String,
+    pub scheme: String,
+    pub host: String,
+    pub method: String,
+    pub path: String,
+    pub version: String,
     pub data: Vec<u8>,
 }
 
@@ -18,44 +40,142 @@ pub async fn add_schema(executor: impl Executor<'_, Database = Sqlite>) -> sqlx:
 }
 
 pub async fn save_request(
-    executor: impl Executor<'_, Database = Sqlite>,
-    method: &str,
+    conn: impl sqlx::Acquire<'_, Database = Sqlite>,
     scheme: &str,
     host: &str,
+    method: &str,
+    path: &str,
+    version: &str,
+    headers: &HashMap<String, String>,
     data: &[u8],
 ) -> sqlx::Result<i64> {
-    sqlx::query!(
-        "INSERT INTO requests (method, scheme, host, data) VALUES (?, ?, ?, ?)",
-        method,
+    let mut tx = conn.begin().await?;
+    let id = sqlx::query!(
+        "INSERT INTO requests (scheme, host, method, path, version, data) VALUES (?, ?, ?, ?, ?, ?)",
         scheme,
         host,
-        data,
+        method,
+        path,
+        version,
+        data
     )
-    .execute(executor)
+    .execute( tx.deref_mut())
     .await
-    .map(|r| r.last_insert_rowid())
+    .map(|r| r.last_insert_rowid())?;
+
+    for (k, v) in headers {
+        sqlx::query!(
+            "INSERT INTO headers (request_id, key, value) VALUES (?, ?, ?)",
+            id,
+            k,
+            v
+        )
+        .execute(tx.deref_mut())
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(id)
 }
 
 pub async fn get_request(
-    executor: impl Executor<'_, Database = Sqlite>,
+    executor: impl Executor<'_, Database = Sqlite> + Clone,
     id: i64,
 ) -> sqlx::Result<Option<Request>> {
-    sqlx::query_as!(
-        Request,
-        "SELECT id, timestamp, method, scheme, host, data FROM requests WHERE id = ?",
+    let req = sqlx::query_as!(
+        Req,
+        "SELECT id, timestamp, scheme, host, method, path, version, data FROM requests WHERE id = ?",
         id,
     )
-    .fetch_optional(executor)
-    .await
+    .fetch_optional(executor.clone())
+    .await?;
+
+    struct Header {
+        pub key: String,
+        pub value: String,
+    }
+    if let Some(req) = req {
+        struct Header {
+            pub key: String,
+            pub value: String,
+        }
+        let headers = sqlx::query_as!(
+            Header,
+            "SELECT key, value FROM headers WHERE request_id = ?",
+            id,
+        )
+        .fetch_all(executor)
+        .await?;
+
+        Ok(Some(Request {
+            id: req.id,
+            timestamp: req.timestamp,
+            scheme: req.scheme,
+            host: req.host,
+            method: req.method,
+            path: req.path,
+            version: req.version,
+            headers: headers
+                .into_iter()
+                .map(|h| {
+                    (
+                        HeaderName::from_bytes(h.key.as_bytes()).unwrap(),
+                        h.value.parse().unwrap(),
+                    )
+                })
+                .collect(),
+            data: req.data,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 pub async fn get_all_request(
-    executor: impl Executor<'_, Database = Sqlite>,
+    executor: impl Executor<'_, Database = Sqlite> + Clone,
 ) -> sqlx::Result<Vec<Request>> {
-    sqlx::query_as!(
-        Request,
-        "SELECT id, timestamp, method, scheme, host, data FROM requests ORDER BY id ASC",
+    let mut reqs = sqlx::query_as!(
+        Req,
+        "SELECT id, timestamp, scheme, host, method, path, version, data FROM requests ORDER BY id ASC",
     )
-    .fetch_all(executor)
-    .await
+    .fetch(executor.clone());
+
+    let mut map = BTreeMap::new();
+    while let Some(r) = reqs.next().await {
+        let r = r?;
+        map.insert(
+            r.id,
+            Request {
+                id: r.id,
+                timestamp: r.timestamp,
+                scheme: r.scheme,
+                host: r.host,
+                method: r.method,
+                path: r.path,
+                version: r.version,
+                headers: HeaderMap::new(),
+                data: r.data,
+            },
+        );
+    }
+
+    struct Header {
+        pub request_id: i64,
+        pub key: String,
+        pub value: String,
+    }
+    let mut headers =
+        sqlx::query_as!(Header, "SELECT request_id, key, value FROM headers",).fetch(executor);
+
+    while let Some(h) = headers.next().await {
+        let h = h?;
+        if let Some(hs) = map.get_mut(&h.request_id) {
+            hs.headers.insert(
+                HeaderName::from_bytes(h.key.as_bytes()).unwrap(),
+                h.value.parse().unwrap(),
+            );
+        }
+    }
+
+    Ok(map.into_values().collect())
 }

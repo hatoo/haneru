@@ -70,7 +70,7 @@ fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
 #[derive(clap::Parser)]
 struct Opt {
     #[clap(short, long, default_value = ":memory:")]
-    sqlite: String,
+    sqlite3: String,
     #[clap(short, long, requires("private_key"))]
     cert: Option<PathBuf>,
     #[clap(short, long, requires("cert"))]
@@ -94,7 +94,7 @@ async fn main() {
     }
     let (tx, _) = broadcast::channel::<i64>(128);
 
-    let pool = SqlitePool::connect(&format!("sqlite:{}", &args.sqlite))
+    let pool = SqlitePool::connect(&format!("sqlite:{}", &args.sqlite3))
         .await
         .unwrap();
     db::add_schema(&pool).await.unwrap();

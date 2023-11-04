@@ -59,7 +59,29 @@ impl Proxy {
         let mut parser = httparse::Request::new(&mut headers);
         parser.parse(req)?;
 
-        let id = db::save_request(&self.pool, parser.method.unwrap(), scheme, host, req).await?;
+        let headers = parser
+            .headers
+            .iter()
+            .take_while(|h| h != &&httparse::EMPTY_HEADER)
+            .map(|h| {
+                (
+                    h.name.to_string(),
+                    std::str::from_utf8(h.value).unwrap().to_string(),
+                )
+            })
+            .collect();
+
+        let id = db::save_request(
+            &self.pool,
+            scheme,
+            host,
+            parser.method.unwrap(),
+            parser.path.unwrap(),
+            "HTTP/1.1",
+            &headers,
+            req,
+        )
+        .await?;
         let _ = self.tx.send(id);
 
         let cell = Arc::new(AsyncCell::default());
