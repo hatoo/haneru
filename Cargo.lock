@@ -812,6 +812,7 @@ dependencies = [
  "hyper",
  "rcgen",
  "rustls",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",

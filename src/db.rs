@@ -20,6 +20,7 @@ pub struct Request {
     pub data: Vec<u8>,
 }
 
+#[derive(sqlx::FromRow)]
 struct Req {
     pub id: i64,
     pub timestamp: String,
@@ -93,14 +94,26 @@ pub async fn save_request(
 pub async fn get_request(
     executor: impl Executor<'_, Database = Sqlite> + Clone,
     id: i64,
+    filter: Option<&str>,
 ) -> sqlx::Result<Option<Request>> {
-    let req = sqlx::query_as!(
-        Req,
-        "SELECT id, timestamp, scheme, host, method, path, version, data FROM requests WHERE id = ?",
-        id,
-    )
-    .fetch_optional(executor.clone())
-    .await?;
+    let query = if let Some(filter) = filter {
+        format!(
+            "SELECT id, requests.timestamp as timestamp, scheme, host, method, path, version, requests.data as data FROM requests
+        JOIN request_headers ON requests.id = request_headers.request_id
+        LEFT JOIN responses ON requests.id = responses.request_id
+        LEFT JOIN response_headers ON requests.id = response_headers.request_id
+        WHERE id = ? AND {}",
+            filter
+        )
+    } else {
+        "SELECT id, timestamp, scheme, host, method, path, version, data FROM requests WHERE id = ?"
+            .to_string()
+    };
+
+    let req = sqlx::query_as::<_, Req>(&query)
+        .bind(id)
+        .fetch_optional(executor.clone())
+        .await?;
 
     if let Some(req) = req {
         let headers = sqlx::query_as!(
@@ -137,12 +150,27 @@ pub async fn get_request(
 
 pub async fn get_all_request(
     executor: impl Executor<'_, Database = Sqlite> + Clone,
+    filter: Option<&str>,
 ) -> sqlx::Result<Vec<Request>> {
-    let mut reqs = sqlx::query_as!(
-        Req,
-        "SELECT id, timestamp, scheme, host, method, path, version, data FROM requests ORDER BY id ASC",
-    )
-    .fetch(executor.clone());
+    // Yes, Self SQL injection here :)
+    let ids = if let Some(filter) = filter {
+        format!(
+            "SELECT DISTINCT id FROM requests 
+        JOIN request_headers ON requests.id = request_headers.request_id
+        LEFT JOIN responses ON requests.id = responses.request_id
+        LEFT JOIN response_headers ON requests.id = response_headers.request_id
+        WHERE {} ORDER BY id ASC",
+            filter
+        )
+    } else {
+        "SELECT id FROM requests ORDER BY id ASC".to_string()
+    };
+
+    let query = format!(
+        "SELECT id, timestamp, scheme, host, method, path, version, data FROM requests WHERE id IN ({}) ORDER BY id ASC",
+        ids
+    );
+    let mut reqs = sqlx::query_as::<_, Req>(&query).fetch(executor.clone());
 
     let mut map = BTreeMap::new();
     while let Some(r) = reqs.next().await {

@@ -66,8 +66,12 @@ impl Proxy {
         Ok(id)
     }
 
-    pub async fn request(&self, id: i64) -> sqlx::Result<Option<db::Request>> {
-        db::get_request(&self.pool, id).await
+    pub async fn request(
+        &self,
+        id: i64,
+        filter: Option<&str>,
+    ) -> sqlx::Result<Option<db::Request>> {
+        db::get_request(&self.pool, id, filter).await
     }
 
     pub async fn response(&self, id: i64) -> anyhow::Result<db::Response> {
@@ -87,16 +91,17 @@ impl Proxy {
 
     pub async fn now_and_future(
         &self,
+        filter: Option<&str>,
     ) -> anyhow::Result<(Vec<db::Request>, broadcast::Receiver<i64>)> {
         let mut rx = self.request_tx.subscribe();
-        let mut now = db::get_all_request(&self.pool).await?;
+        let mut now = db::get_all_request(&self.pool, filter).await?;
 
         if let Some(last) = now.last() {
             let last_id = last.id;
             loop {
                 if let Ok(next) = rx.try_recv() {
                     if next > last_id {
-                        now.push(db::get_request(&self.pool, next).await?.unwrap());
+                        now.push(db::get_request(&self.pool, next, filter).await?.unwrap());
                         break;
                     }
                 } else {

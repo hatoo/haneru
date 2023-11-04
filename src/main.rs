@@ -1,7 +1,7 @@
 use askama::Template;
 use askama_axum::IntoResponse;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::sse::{Event, Sse},
     routing::get,
     Router,
@@ -102,15 +102,24 @@ async fn main() {
     let app = Router::new()
         .route("/", get(|| async { Live }))
         .route("/cert", get(cert))
-        .route("/log", get(|| async { LogHtml }))
+        .route(
+            "/log",
+            get(|q: Query<Q>| async move {
+                LogHtml {
+                    value: q.q.as_deref().unwrap_or("").to_string(),
+                    query: q
+                        .q
+                        .as_ref()
+                        .map(|q| format!("?q={}", q))
+                        .unwrap_or_default(),
+                }
+            }),
+        )
         .route("/log/:id", get(request_log_serial))
         .route("/detail/:id", get(detail))
         .route("/response/:id", get(response))
         .route("/sse/live", get(sse_req))
-        .route(
-            "/sse/log",
-            get(|state| async move { request_log(state).await }),
-        )
+        .route("/sse/log", get(request_log))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state_app);
 
@@ -169,7 +178,7 @@ async fn sse_req(state: State<Arc<Proxy>>) -> Sse<impl Stream<Item = Result<Even
     let state = state.0.clone();
     let stream = stream::unfold((rx, state), |(mut rx, state)| async {
         let id = rx.recv().await.unwrap();
-        let req = state.request(id).await.unwrap().unwrap();
+        let req = state.request(id, None).await.unwrap().unwrap();
 
         let text =
             String::from_utf8(req.data.clone()).unwrap_or_else(|_| "invalid utf-8".to_string());
@@ -226,13 +235,18 @@ async fn req_to_event(req: db::Request, state: &Proxy) -> anyhow::Result<Event> 
     )))
 }
 
+#[derive(serde::Deserialize)]
+struct Q {
+    q: Option<String>,
+}
 async fn request_log(
     state: State<Arc<Proxy>>,
+    query: Query<Q>,
 ) -> Result<Sse<impl Stream<Item = anyhow::Result<Event>>>, &'static str> {
     (|| async {
         let state2 = state.clone();
 
-        let (log, rx) = state.now_and_future().await.unwrap();
+        let (log, rx) = state.now_and_future(query.q.as_deref()).await.unwrap();
 
         let mut log_event = Vec::new();
 
@@ -243,12 +257,18 @@ async fn request_log(
 
         let stream = stream::iter(log_event.into_iter())
             .chain(stream::unfold(
-                (rx, state2),
-                move |(mut rx, state)| async move {
-                    let id = rx.recv().await.unwrap();
-                    let req = state.request(id).await.unwrap().unwrap();
+                (rx, state2, query),
+                move |(mut rx, state, query)| async move {
+                    let req = loop {
+                        let id = rx.recv().await.unwrap();
+                        let req = state.request(id, query.q.as_deref()).await.unwrap();
 
-                    Some((req_to_event(req, &state).await.unwrap(), (rx, state)))
+                        if let Some(req) = req {
+                            break req;
+                        }
+                    };
+
+                    Some((req_to_event(req, &state).await.unwrap(), (rx, state, query)))
                 },
             ))
             .map(Ok);
@@ -261,10 +281,13 @@ async fn request_log(
 
 #[derive(Template)]
 #[template(path = "request_log.html")]
-struct LogHtml;
+struct LogHtml {
+    value: String,
+    query: String,
+}
 
 async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
-    let Ok(Some(req)) = state.request(id).await else {
+    let Ok(Some(req)) = state.request(id, None).await else {
         return "NOT FOUND".to_string();
     };
 
@@ -286,7 +309,7 @@ struct DetailHtml {
 }
 
 async fn detail(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> DetailHtml {
-    let request = state.request(id).await.unwrap();
+    let request = state.request(id, None).await.unwrap();
     let request = request
         .map(|r| String::from_utf8_lossy(r.data.as_slice()).to_string())
         .unwrap_or_default();

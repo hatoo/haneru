@@ -4,6 +4,11 @@
 Log
 {% endblock subtitle %}
 {% block content %}
+<form hx-get="/log" hx-target="body" hx-push-url="true">
+    <textarea name="q">{{value}}</textarea>
+    <button type="submit">Search</button>
+</form>
+
 <table>
     <thead>
         <tr>
@@ -16,7 +21,7 @@ Log
             <th>Content-Type</th>
         </tr>
     </thead>
-    <tbody hx-ext="sse" sse-connect="/sse/log" sse-swap="request" hx-swap="beforeend">
+    <tbody hx-ext="sse" sse-connect="/sse/log{{query}}" sse-swap="request" hx-swap="beforeend">
     </tbody>
 </table>
 <div id="detail">
