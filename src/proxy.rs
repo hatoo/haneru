@@ -1,72 +1,133 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::Arc;
 
 use anyhow::Context;
-use async_cell::sync::AsyncCell;
-use axum::http::uri;
-use hyper::Uri;
-use moka::sync::Cache;
+use axum::http::{uri, HeaderName, HeaderValue};
+use hyper::{HeaderMap, Uri};
 use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
+use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::broadcast::Sender,
+    sync::broadcast::{self, Sender},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::{
+    db,
     http::{parse_path, read_req, read_resp, replace_path},
-    make_cert, root_cert, RequestLog, Server,
+    make_cert, root_cert,
 };
 
 pub struct Proxy {
-    tx: Sender<Arc<RequestLog>>,
-    serial_counter: AtomicUsize,
-    response_map: Cache<usize, Arc<AsyncCell<Arc<Vec<u8>>>>>,
-    request_map: Cache<usize, Arc<RequestLog>>,
+    pub request_tx: Sender<i64>,
+    pub response_tx: Sender<i64>,
+    pool: SqlitePool,
 }
 
 impl Proxy {
-    pub fn new(tx: Sender<Arc<RequestLog>>) -> Self {
+    pub fn new(request_tx: Sender<i64>, response_tx: Sender<i64>, pool: SqlitePool) -> Self {
         Self {
-            tx,
-            serial_counter: AtomicUsize::new(1),
-            response_map: Cache::new(2048),
-            request_map: Cache::new(2048),
+            request_tx,
+            response_tx,
+            pool,
         }
     }
 
-    pub fn new_req(&self, host: String, req: Vec<u8>) -> Arc<AsyncCell<Arc<Vec<u8>>>> {
-        let id = self
-            .serial_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let req = Arc::new(RequestLog::new(id, host, req).unwrap());
-        let _ = self.tx.send(req.clone());
-        let cell = Arc::new(AsyncCell::default());
-        self.response_map.insert(id, cell.clone());
-        self.request_map.insert(id, req);
-        cell
+    pub async fn new_req(&self, scheme: &str, host: &str, req: &[u8]) -> anyhow::Result<i64> {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut parser = httparse::Request::new(&mut headers);
+        parser.parse(req)?;
+
+        let headers = parser
+            .headers
+            .iter()
+            .take_while(|h| h != &&httparse::EMPTY_HEADER)
+            .map(|h| {
+                Ok::<_, anyhow::Error>((
+                    HeaderName::try_from(h.name)?,
+                    HeaderValue::from_bytes(h.value)?,
+                ))
+            })
+            .collect::<Result<HeaderMap, _>>()?;
+
+        let id = db::save_request(
+            &self.pool,
+            scheme,
+            host,
+            parser.method.unwrap(),
+            parser.path.unwrap(),
+            "HTTP/1.1",
+            &headers,
+            req,
+        )
+        .await?;
+        let _ = self.request_tx.send(id);
+
+        Ok(id)
     }
 
-    pub fn request(&self, serial: usize) -> Option<Arc<RequestLog>> {
-        self.request_map.get(&serial)
+    pub async fn request(&self, id: i64) -> sqlx::Result<Option<db::Request>> {
+        db::get_request(&self.pool, id).await
     }
 
-    pub async fn response(&self, serial: usize) -> Option<Arc<Vec<u8>>> {
-        let cell = self.response_map.get(&serial)?;
-        let resp = cell.get().await;
-        Some(resp)
-    }
+    pub async fn response(&self, id: i64) -> anyhow::Result<db::Response> {
+        let mut rx = self.response_tx.subscribe();
 
-    pub fn try_response(&self, serial: usize) -> Server<Arc<Vec<u8>>> {
-        if let Some(cell) = self.response_map.get(&serial) {
-            if let Some(resp) = cell.try_get() {
-                Server::Some(resp)
-            } else {
-                Server::Ongoing
-            }
+        if let Some(res) = db::get_response(&self.pool, id).await? {
+            Ok(res)
         } else {
-            Server::Expired
+            while rx.recv().await? != id {}
+            Ok(db::get_response(&self.pool, id).await?.unwrap())
         }
+    }
+
+    pub async fn try_response(&self, id: i64) -> sqlx::Result<Option<db::Response>> {
+        db::get_response(&self.pool, id).await
+    }
+
+    pub async fn now_and_future(
+        &self,
+    ) -> anyhow::Result<(Vec<db::Request>, broadcast::Receiver<i64>)> {
+        let mut rx = self.request_tx.subscribe();
+        let mut now = db::get_all_request(&self.pool).await?;
+
+        if let Some(last) = now.last() {
+            let last_id = last.id;
+            loop {
+                if let Ok(next) = rx.try_recv() {
+                    if next > last_id {
+                        now.push(db::get_request(&self.pool, next).await?.unwrap());
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok((now, rx))
+    }
+
+    async fn save_response(&self, id: i64, data: &[u8]) -> anyhow::Result<()> {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut parser = httparse::Response::new(&mut headers);
+        parser.parse(data)?;
+
+        let headers = parser
+            .headers
+            .iter()
+            .take_while(|h| h != &&httparse::EMPTY_HEADER)
+            .map(|h| {
+                Ok::<_, anyhow::Error>((
+                    HeaderName::try_from(h.name)?,
+                    HeaderValue::from_bytes(h.value)?,
+                ))
+            })
+            .collect::<Result<HeaderMap, _>>()?;
+
+        db::save_response(&self.pool, id, parser.code.unwrap() as _, &headers, data).await?;
+        let _ = self.response_tx.send(id);
+        Ok(())
     }
 }
 
@@ -87,25 +148,21 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
-        let cell = state.new_req(format!("http://{}", uri.host().unwrap()), buf.clone());
-        let mut server = TcpStream::connect(format!(
-            "{}:{}",
-            uri.host().unwrap(),
-            uri.port_u16().unwrap_or(80)
-        ))
-        .await
-        .unwrap();
+        let id = state.new_req("http", uri.host().unwrap(), &buf).await?;
+        let mut server =
+            TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
 
         server.write_all(buf.as_ref()).await?;
 
         if has_upgrade {
             let resp = sniff(stream, server).await;
-            cell.set(Arc::new(resp));
+            state.save_response(id, &resp).await?;
+            let _ = state.response_tx.send(id);
         } else {
             let resp = read_resp(&mut server).await?.context("no resp")?;
             stream.write_all(resp.as_ref()).await?;
-            cell.set(Arc::new(resp));
-
+            state.save_response(id, &resp).await?;
+            let _ = state.response_tx.send(id);
             conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
         };
     }
@@ -126,20 +183,21 @@ async fn conn_loop<
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
-        let cell = state.new_req(
-            format!("{}://{}", scheme, base.host().unwrap()),
-            req.clone(),
-        );
+        let id = state
+            .new_req(scheme.as_str(), base.host().unwrap(), &req)
+            .await?;
 
         if has_upgrade {
             let resp = sniff(client, server).await;
-            cell.set(Arc::new(resp));
+            state.save_response(id, &resp).await?;
+            let _ = state.response_tx.send(id);
             break;
         } else {
             server.write_all(&req).await?;
             let resp = read_resp(&mut server).await?.context("no resp")?;
             client.write_all(&resp).await?;
-            cell.set(Arc::new(resp));
+            state.save_response(id, &resp).await?;
+            let _ = state.response_tx.send(id);
         }
     }
     Ok(())
@@ -192,7 +250,7 @@ async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     uri: Uri,
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
-    let cert = make_cert(vec![uri.host().unwrap().to_string()]);
+    let cert = make_cert(vec![uri.host().context("no host on path")?.to_string()]);
     let signed = cert.serialize_der_with_signer(root_cert().await)?;
     let private_key = cert.get_key_pair().serialize_der();
     let server_config = ServerConfig::builder()

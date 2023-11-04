@@ -8,27 +8,24 @@ use axum::{
 };
 use clap::Parser;
 use futures::{stream, Stream, StreamExt};
-use http::ParsedRequest;
-use httparse::Status;
-use hyper::{header, HeaderMap};
+use hyper::header;
 use rcgen::CertificateParams;
+use sqlx::SqlitePool;
 use sse::replace_cr;
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     net::TcpListener,
-    sync::{
-        broadcast::{self, Receiver},
-        Mutex,
-    },
+    sync::broadcast::{self},
 };
 use tower_http::services::ServeDir;
 
-use crate::{log_chan::LogChan, proxy::Proxy};
+use crate::proxy::Proxy;
 
+mod db;
 mod http;
-mod log_chan;
 mod proxy;
 mod sse;
+mod template;
 
 static ROOT_CERT: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
 async fn root_cert() -> &'static rcgen::Certificate {
@@ -68,6 +65,8 @@ fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
 
 #[derive(clap::Parser)]
 struct Opt {
+    #[clap(short, long, default_value = ":memory:")]
+    sqlite3: String,
     #[clap(short, long, requires("private_key"))]
     cert: Option<PathBuf>,
     #[clap(short, long, requires("cert"))]
@@ -89,22 +88,14 @@ async fn main() {
             .map_err(|_| anyhow::anyhow!("failed to set root cert"))
             .unwrap();
     }
-    let (tx, _) = broadcast::channel::<Arc<RequestLog>>(128);
+    let (request_tx, _) = broadcast::channel::<i64>(128);
+    let (response_tx, _) = broadcast::channel::<i64>(128);
 
-    let state = Arc::new(Proxy::new(tx.clone()));
-
-    let log_chan = Arc::new(Mutex::new(LogChan::default()));
-
-    let mut rx = tx.subscribe();
-    let lc = log_chan.clone();
-    tokio::spawn(async move {
-        loop {
-            let req = rx.recv().await.unwrap();
-
-            let mut lock = lc.lock().await;
-            lock.push(req.clone());
-        }
-    });
+    let pool = SqlitePool::connect(&format!("sqlite:{}", &args.sqlite3))
+        .await
+        .unwrap();
+    db::add_schema(&pool).await.unwrap();
+    let state = Arc::new(Proxy::new(request_tx.clone(), response_tx.clone(), pool));
 
     let state_app = state.clone();
     // build our application with a route
@@ -115,13 +106,10 @@ async fn main() {
         .route("/log/:id", get(request_log_serial))
         .route("/detail/:id", get(detail))
         .route("/response/:id", get(response))
-        .route(
-            "/sse/live",
-            get(|| async move { sse_req(tx.subscribe()).await }),
-        )
+        .route("/sse/live", get(sse_req))
         .route(
             "/sse/log",
-            get(|state| async move { request_log(log_chan.clone(), state).await }),
+            get(|state| async move { request_log(state).await }),
         )
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state_app);
@@ -150,29 +138,6 @@ async fn cert() -> impl IntoResponse {
 #[template(path = "live.html")]
 struct Live;
 
-#[derive(Debug, Clone)]
-pub struct RequestLog {
-    serial: usize,
-    timestamp: chrono::DateTime<chrono::Local>,
-    host: String,
-    parsed_request: ParsedRequest,
-}
-
-impl RequestLog {
-    fn new(serial: usize, host: String, data: Vec<u8>) -> anyhow::Result<Self> {
-        Ok(Self {
-            serial,
-            timestamp: chrono::Local::now(),
-            host,
-            parsed_request: ParsedRequest::new(data)?,
-        })
-    }
-
-    pub fn timestamp(&self) -> String {
-        self.timestamp.format("%H:%M:%S").to_string()
-    }
-}
-
 async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
 
@@ -195,28 +160,29 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
 #[derive(Template)]
 #[template(path = "request.html")]
 struct RequestHtml<'a> {
-    id: usize,
+    id: i64,
     content: &'a str,
 }
 
-async fn sse_req(
-    rx: Receiver<Arc<RequestLog>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = stream::unfold(rx, |mut rx| async {
-        let req = rx.recv().await.unwrap();
+async fn sse_req(state: State<Arc<Proxy>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.request_tx.subscribe();
+    let state = state.0.clone();
+    let stream = stream::unfold((rx, state), |(mut rx, state)| async {
+        let id = rx.recv().await.unwrap();
+        let req = state.request(id).await.unwrap().unwrap();
 
-        let text = String::from_utf8(req.parsed_request.data.clone())
-            .unwrap_or_else(|_| "invalid utf-8".to_string());
+        let text =
+            String::from_utf8(req.data.clone()).unwrap_or_else(|_| "invalid utf-8".to_string());
         Some((
             Event::default().event("request").data(replace_cr(
                 RequestHtml {
-                    id: req.serial,
+                    id: req.id,
                     content: &text,
                 }
                 .to_string()
                 .as_str(),
             )),
-            rx,
+            (rx, state),
         ))
     })
     .map(Ok);
@@ -229,147 +195,86 @@ async fn sse_req(
 struct ResponseHtml {
     content: String,
 }
-async fn response(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
-    let Some(resp) = state.response(id).await else {
+async fn response(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
+    let Ok(resp) = state.response(id).await else {
         return ResponseHtml {
             content: "Not Found".to_string(),
         };
     };
-    let content = String::from_utf8(resp.as_ref().clone())
-        .unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
+    let content =
+        String::from_utf8(resp.data).unwrap_or_else(|_| "Not Valid UTF-8 string".to_string());
 
     ResponseHtml { content }
-}
-
-#[derive(Debug, Clone)]
-pub enum Server<T> {
-    Some(T),
-    Ongoing,
-    Expired,
-}
-
-impl<T> Server<T> {
-    pub fn is_ongoing(&self) -> bool {
-        matches!(self, Self::Ongoing)
-    }
-
-    pub fn map<D>(self, f: impl FnOnce(T) -> D) -> Server<D> {
-        match self {
-            Self::Some(t) => Server::Some(f(t)),
-            Self::Ongoing => Server::Ongoing,
-            Self::Expired => Server::Expired,
-        }
-    }
-}
-
-pub struct ResponseLog {
-    body_length: usize,
-    content_type: String,
-}
-
-impl ResponseLog {
-    pub fn parse(buf: &[u8]) -> Self {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut resp = httparse::Response::new(&mut headers);
-        if let Status::Complete(n) = resp.parse(buf).unwrap() {
-            let mut header_map = HeaderMap::new();
-
-            for header in headers.iter().take_while(|h| h != &&httparse::EMPTY_HEADER) {
-                header_map.insert(
-                    header::HeaderName::from_bytes(header.name.as_bytes()).unwrap(),
-                    header::HeaderValue::from_bytes(header.value).unwrap(),
-                );
-            }
-
-            Self {
-                body_length: buf[n..].len(),
-                content_type: header_map
-                    .get(header::CONTENT_TYPE)
-                    .map(|v| v.to_str().unwrap().to_string())
-                    .unwrap_or_default(),
-            }
-        } else {
-            todo!()
-        }
-    }
-}
-
-impl Server<ResponseLog> {
-    pub fn body_length(&self) -> String {
-        match self {
-            Server::Some(res) => res.body_length.to_string(),
-            _ => "N/A".to_string(),
-        }
-    }
-
-    pub fn content_type(&self) -> String {
-        match self {
-            Server::Some(res) => res.content_type.clone(),
-            _ => "N/A".to_string(),
-        }
-    }
 }
 
 #[derive(Template)]
 #[template(path = "request_tr.html")]
 struct RequestTrHtml {
-    request: Arc<RequestLog>,
-    response: Server<ResponseLog>,
+    request: db::Request,
+    response: template::OngoingResponse,
 }
 
-fn req_to_event(req: Arc<RequestLog>, state: &Proxy) -> Event {
-    let response = state
-        .try_response(req.serial)
-        .map(|resp| ResponseLog::parse(&resp));
-
-    Event::default().event("request").data(replace_cr(
+async fn req_to_event(req: db::Request, state: &Proxy) -> anyhow::Result<Event> {
+    let response = state.try_response(req.id).await?;
+    Ok(Event::default().event("request").data(replace_cr(
         RequestTrHtml {
             request: req,
-            response,
+            response: template::OngoingResponse(response),
         }
         .to_string()
         .as_str(),
-    ))
+    )))
 }
 
 async fn request_log(
-    log_chan: Arc<Mutex<LogChan<Arc<RequestLog>>>>,
     state: State<Arc<Proxy>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let state2 = state.clone();
-    let (log, rx) = log_chan.lock().await.now_and_future();
-    let stream = stream::iter(log.into_iter().map(move |req| req_to_event(req, &state)))
-        .chain(stream::unfold(
-            (rx, state2),
-            move |(mut rx, state)| async move {
-                let req = rx.recv().await.unwrap();
+) -> Result<Sse<impl Stream<Item = anyhow::Result<Event>>>, &'static str> {
+    (|| async {
+        let state2 = state.clone();
 
-                Some((req_to_event(req, &state), (rx, state)))
-            },
-        ))
-        .map(Ok);
+        let (log, rx) = state.now_and_future().await.unwrap();
 
-    Sse::new(stream)
+        let mut log_event = Vec::new();
+
+        // TODO: bulk select
+        for req in log {
+            log_event.push(req_to_event(req, &state).await?);
+        }
+
+        let stream = stream::iter(log_event.into_iter())
+            .chain(stream::unfold(
+                (rx, state2),
+                move |(mut rx, state)| async move {
+                    let id = rx.recv().await.unwrap();
+                    let req = state.request(id).await.unwrap().unwrap();
+
+                    Some((req_to_event(req, &state).await.unwrap(), (rx, state)))
+                },
+            ))
+            .map(Ok);
+
+        Ok::<_, anyhow::Error>(Sse::new(stream))
+    })()
+    .await
+    .map_err(|_| "failed to get request log")
 }
 
 #[derive(Template)]
 #[template(path = "request_log.html")]
 struct LogHtml;
 
-async fn request_log_serial(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> impl IntoResponse {
-    let Some(req) = state.request(id) else {
+async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
+    let Ok(Some(req)) = state.request(id).await else {
         return "NOT FOUND".to_string();
     };
 
-    let response = if let Some(data) = state.response(id).await {
-        Server::Some(ResponseLog::parse(&data))
-    } else {
-        Server::Expired
+    let Ok(response) = state.response(id).await else {
+        return "NOT FOUND".to_string();
     };
 
     RequestTrHtml {
         request: req,
-        response,
+        response: template::OngoingResponse(Some(response)),
     }
     .to_string()
 }
@@ -380,10 +285,10 @@ struct DetailHtml {
     request: String,
 }
 
-async fn detail(Path(id): Path<usize>, state: State<Arc<Proxy>>) -> DetailHtml {
-    let request = state.request(id);
+async fn detail(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> DetailHtml {
+    let request = state.request(id).await.unwrap();
     let request = request
-        .map(|r| String::from_utf8_lossy(r.parsed_request.data.as_slice()).to_string())
+        .map(|r| String::from_utf8_lossy(r.data.as_slice()).to_string())
         .unwrap_or_default();
     DetailHtml { request }
 }

@@ -1,7 +1,6 @@
 use anyhow::Context;
-use axum::http::{HeaderName, HeaderValue};
 use httparse::Status;
-use hyper::{HeaderMap, Uri};
+use hyper::Uri;
 use tokio::io::AsyncReadExt;
 
 fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
@@ -149,44 +148,4 @@ pub fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     ret.extend(&buf[i..]);
 
     Some(ret)
-}
-
-#[derive(Debug, Clone)]
-pub struct ParsedRequest {
-    pub method: String,
-    pub path: String,
-    pub version: String,
-    pub headers: HeaderMap,
-    pub body_start: usize,
-    pub data: Vec<u8>,
-}
-
-impl ParsedRequest {
-    pub fn new(data: Vec<u8>) -> anyhow::Result<Self> {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut req = httparse::Request::new(&mut headers);
-        let Status::Complete(n) = req.parse(&data)? else {
-            anyhow::bail!("invalid request");
-        };
-        let headers = req
-            .headers
-            .iter()
-            .take_while(|h| h != &&httparse::EMPTY_HEADER)
-            .map(|h| {
-                Ok((
-                    HeaderName::from_bytes(h.name.as_bytes()).context("invalid header name")?,
-                    HeaderValue::from_bytes(h.value).context("invalid header value")?,
-                ))
-            })
-            .collect::<anyhow::Result<HeaderMap>>()?;
-
-        Ok(Self {
-            method: req.method.context("invalid request")?.to_string(),
-            path: req.path.context("invalid request")?.to_string(),
-            version: req.version.context("invalid request")?.to_string(),
-            headers,
-            body_start: n,
-            data,
-        })
-    }
 }
