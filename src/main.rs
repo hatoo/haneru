@@ -102,19 +102,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(|| async { Live }))
         .route("/cert", get(cert))
-        .route(
-            "/log",
-            get(|q: Query<Q>| async move {
-                LogHtml {
-                    value: q.q.as_deref().unwrap_or("").to_string(),
-                    query: q
-                        .q
-                        .as_ref()
-                        .map(|q| format!("?q={}", q))
-                        .unwrap_or_default(),
-                }
-            }),
-        )
+        .route("/log", get(|q: Query<Q>| async move { LogHtml { q: q.0 } }))
         .route("/log/:id", get(request_log_serial))
         .route("/detail/:id", get(detail))
         .route("/response/:id", get(response))
@@ -235,10 +223,24 @@ async fn req_to_event(req: db::Request, state: &Proxy) -> anyhow::Result<Event> 
     )))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct Q {
     q: Option<String>,
 }
+
+impl Q {
+    fn query(&self) -> String {
+        self.q
+            .as_deref()
+            .map(|q| format!("?q={}", q))
+            .unwrap_or_default()
+    }
+
+    fn value(&self) -> String {
+        self.q.as_deref().unwrap_or("").to_string()
+    }
+}
+
 async fn request_log(
     state: State<Arc<Proxy>>,
     query: Query<Q>,
@@ -282,8 +284,7 @@ async fn request_log(
 #[derive(Template)]
 #[template(path = "request_log.html")]
 struct LogHtml {
-    value: String,
-    query: String,
+    q: Q,
 }
 
 async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoResponse {
