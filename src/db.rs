@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    hash::Hash,
-    ops::DerefMut,
-};
+use std::{collections::BTreeMap, ops::DerefMut};
 
 use axum::http::HeaderName;
 use futures::StreamExt;
