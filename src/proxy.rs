@@ -126,6 +126,7 @@ impl Proxy {
             .collect::<Result<HeaderMap, _>>()?;
 
         db::save_response(&self.pool, id, parser.code.unwrap() as _, &headers, data).await?;
+        let _ = self.response_tx.send(id);
         Ok(())
     }
 }

@@ -1,19 +1,12 @@
-{#
-{% let is_ongoing = response.is_ongoing() %}
-{% let response_size = response.body_length() %}
-{% let content_type = response.content_type() %}
+{% let is_ongoing = response.0.is_none() %}
 
-<tr {% if is_ongoing %} hx-trigger="load" hx-swap="outerHTML" hx-get="/log/{{request.serial}}" {% endif %}
-    onclick="htmx.ajax('GET', '/detail/{{request.serial}}', '#detail')">
-    <td>{{request.serial}}</td>
-    <td>{{request.timestamp()}}</td>
-    <td>{{request.host}}</td>
-    <td>{{request.parsed_request.method}}</td>
-    <td>{{request.parsed_request.path}}</td>
-    <td>{{response_size}}</td>
-    <td>{{content_type}}</td>
-</tr>
-#}
-<tr>
+<tr {% if is_ongoing %} hx-trigger="load" hx-swap="outerHTML" hx-get="/log/{{request.id}}" {% endif %}
+    onclick="htmx.ajax('GET', '/detail/{{request.id}}', '#detail')">
     <td>{{request.id}}</td>
+    <td>{{request.timestamp}}</td>
+    <td>{{request.host}}</td>
+    <td>{{request.method}}</td>
+    <td>{{request.path}}</td>
+    <td>{{response.length()}}</td>
+    <td>{{response.content_type()}}</td>
 </tr>

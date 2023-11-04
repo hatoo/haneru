@@ -8,8 +8,7 @@ use axum::{
 };
 use clap::Parser;
 use futures::{stream, Stream, StreamExt};
-use httparse::Status;
-use hyper::{header, HeaderMap};
+use hyper::header;
 use rcgen::CertificateParams;
 use sqlx::SqlitePool;
 use sse::replace_cr;
@@ -26,6 +25,7 @@ mod db;
 mod http;
 mod proxy;
 mod sse;
+mod template;
 
 static ROOT_CERT: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
 async fn root_cert() -> &'static rcgen::Certificate {
@@ -211,7 +211,7 @@ async fn response(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoRes
 #[template(path = "request_tr.html")]
 struct RequestTrHtml {
     request: db::Request,
-    response: Option<db::Response>,
+    response: template::OngoingResponse,
 }
 
 async fn req_to_event(req: db::Request, state: &Proxy) -> anyhow::Result<Event> {
@@ -219,7 +219,7 @@ async fn req_to_event(req: db::Request, state: &Proxy) -> anyhow::Result<Event> 
     Ok(Event::default().event("request").data(replace_cr(
         RequestTrHtml {
             request: req,
-            response,
+            response: template::OngoingResponse(response),
         }
         .to_string()
         .as_str(),
@@ -274,7 +274,7 @@ async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> im
 
     RequestTrHtml {
         request: req,
-        response: Some(response),
+        response: template::OngoingResponse(Some(response)),
     }
     .to_string()
 }
