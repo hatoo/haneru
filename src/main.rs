@@ -139,29 +139,6 @@ async fn cert() -> impl IntoResponse {
 #[template(path = "live.html")]
 struct Live;
 
-#[derive(Debug, Clone)]
-pub struct RequestLog {
-    serial: usize,
-    timestamp: chrono::DateTime<chrono::Local>,
-    host: String,
-    parsed_request: ParsedRequest,
-}
-
-impl RequestLog {
-    fn new(serial: usize, host: String, data: Vec<u8>) -> anyhow::Result<Self> {
-        Ok(Self {
-            serial,
-            timestamp: chrono::Local::now(),
-            host,
-            parsed_request: ParsedRequest::new(data)?,
-        })
-    }
-
-    pub fn timestamp(&self) -> String {
-        self.timestamp.format("%H:%M:%S").to_string()
-    }
-}
-
 async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
 
@@ -231,27 +208,6 @@ async fn response(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoRes
     ResponseHtml { content }
 }
 
-#[derive(Debug, Clone)]
-pub enum Server<T> {
-    Some(T),
-    Ongoing,
-    Expired,
-}
-
-impl<T> Server<T> {
-    pub fn is_ongoing(&self) -> bool {
-        matches!(self, Self::Ongoing)
-    }
-
-    pub fn map<D>(self, f: impl FnOnce(T) -> D) -> Server<D> {
-        match self {
-            Self::Some(t) => Server::Some(f(t)),
-            Self::Ongoing => Server::Ongoing,
-            Self::Expired => Server::Expired,
-        }
-    }
-}
-
 pub struct ResponseLog {
     body_length: usize,
     content_type: String,
@@ -280,22 +236,6 @@ impl ResponseLog {
             }
         } else {
             todo!()
-        }
-    }
-}
-
-impl Server<ResponseLog> {
-    pub fn body_length(&self) -> String {
-        match self {
-            Server::Some(res) => res.body_length.to_string(),
-            _ => "N/A".to_string(),
-        }
-    }
-
-    pub fn content_type(&self) -> String {
-        match self {
-            Server::Some(res) => res.content_type.clone(),
-            _ => "N/A".to_string(),
         }
     }
 }
