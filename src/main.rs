@@ -207,74 +207,55 @@ async fn response(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> impl IntoRes
     ResponseHtml { content }
 }
 
-pub struct ResponseLog {
-    body_length: usize,
-    content_type: String,
-}
-
-impl ResponseLog {
-    pub fn parse(buf: &[u8]) -> Self {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut resp = httparse::Response::new(&mut headers);
-        if let Status::Complete(n) = resp.parse(buf).unwrap() {
-            let mut header_map = HeaderMap::new();
-
-            for header in headers.iter().take_while(|h| h != &&httparse::EMPTY_HEADER) {
-                header_map.insert(
-                    header::HeaderName::from_bytes(header.name.as_bytes()).unwrap(),
-                    header::HeaderValue::from_bytes(header.value).unwrap(),
-                );
-            }
-
-            Self {
-                body_length: buf[n..].len(),
-                content_type: header_map
-                    .get(header::CONTENT_TYPE)
-                    .map(|v| v.to_str().unwrap().to_string())
-                    .unwrap_or_default(),
-            }
-        } else {
-            todo!()
-        }
-    }
-}
-
 #[derive(Template)]
 #[template(path = "request_tr.html")]
 struct RequestTrHtml {
     request: db::Request,
-    response: Option<ResponseLog>,
+    response: Option<db::Response>,
 }
 
-fn req_to_event(req: db::Request, state: &Proxy) -> Event {
-    Event::default().event("request").data(replace_cr(
+async fn req_to_event(req: db::Request, state: &Proxy) -> anyhow::Result<Event> {
+    let response = state.try_response(req.id).await?;
+    Ok(Event::default().event("request").data(replace_cr(
         RequestTrHtml {
             request: req,
-            response: None,
+            response,
         }
         .to_string()
         .as_str(),
-    ))
+    )))
 }
 
 async fn request_log(
     state: State<Arc<Proxy>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let state2 = state.clone();
-    let (log, rx) = state.now_and_future().await.unwrap();
-    let stream = stream::iter(log.into_iter().map(move |req| req_to_event(req, &state)))
-        .chain(stream::unfold(
-            (rx, state2),
-            move |(mut rx, state)| async move {
-                let id = rx.recv().await.unwrap();
-                let req = state.request(id).await.unwrap().unwrap();
+) -> Result<Sse<impl Stream<Item = anyhow::Result<Event>>>, &'static str> {
+    (|| async {
+        let state2 = state.clone();
 
-                Some((req_to_event(req, &state), (rx, state)))
-            },
-        ))
-        .map(Ok);
+        let (log, rx) = state.now_and_future().await.unwrap();
 
-    Sse::new(stream)
+        let mut log_event = Vec::new();
+
+        for req in log {
+            log_event.push(req_to_event(req, &state).await?);
+        }
+
+        let stream = stream::iter(log_event.into_iter())
+            .chain(stream::unfold(
+                (rx, state2),
+                move |(mut rx, state)| async move {
+                    let id = rx.recv().await.unwrap();
+                    let req = state.request(id).await.unwrap().unwrap();
+
+                    Some((req_to_event(req, &state).await.unwrap(), (rx, state)))
+                },
+            ))
+            .map(Ok);
+
+        Ok::<_, anyhow::Error>(Sse::new(stream))
+    })()
+    .await
+    .map_err(|_| "failed to get request log")
 }
 
 #[derive(Template)]
@@ -292,7 +273,7 @@ async fn request_log_serial(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> im
 
     RequestTrHtml {
         request: req,
-        response: Some(ResponseLog::parse(&response.data)),
+        response: Some(response),
     }
     .to_string()
 }
