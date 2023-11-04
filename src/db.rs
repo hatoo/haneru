@@ -6,7 +6,7 @@ use std::{
 use axum::http::HeaderName;
 use futures::StreamExt;
 use hyper::HeaderMap;
-use sqlx::{Connection, Executor, Sqlite};
+use sqlx::{Executor, Sqlite};
 
 const SCHEMA_SQL: &str = include_str!("../schema.sql");
 

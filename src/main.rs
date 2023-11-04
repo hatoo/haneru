@@ -1,4 +1,3 @@
-use anyhow::Context;
 use askama::Template;
 use askama_axum::IntoResponse;
 use axum::{
@@ -13,15 +12,12 @@ use http::ParsedRequest;
 use httparse::Status;
 use hyper::{header, HeaderMap};
 use rcgen::CertificateParams;
-use sqlx::{Connection, SqliteConnection, SqlitePool};
+use sqlx::SqlitePool;
 use sse::replace_cr;
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     net::TcpListener,
-    sync::{
-        broadcast::{self, Receiver},
-        Mutex,
-    },
+    sync::broadcast::{self},
 };
 use tower_http::services::ServeDir;
 

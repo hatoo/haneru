@@ -1,10 +1,8 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::Arc;
 
 use anyhow::Context;
-use async_cell::sync::AsyncCell;
 use axum::http::uri;
 use hyper::Uri;
-use moka::sync::Cache;
 use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
 use sqlx::SqlitePool;
 use tokio::{
@@ -16,8 +14,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::{
     db,
-    http::{parse_path, read_req, read_resp, replace_path, ParsedRequest},
-    make_cert, root_cert, RequestLog, Server,
+    http::{parse_path, read_req, read_resp, replace_path},
+    make_cert, root_cert,
 };
 
 pub struct Proxy {
