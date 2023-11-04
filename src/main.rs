@@ -249,12 +249,12 @@ struct BlankRequestHtml {
 }
 async fn request_log(
     state: State<Arc<Proxy>>,
-    query: Query<Q>,
+    Query(q): Query<Q>,
 ) -> Result<Sse<impl Stream<Item = anyhow::Result<Event>>>, &'static str> {
     (|| async {
         let state2 = state.clone();
 
-        let (log, rx) = state.now_and_future(query.q.as_deref()).await.unwrap();
+        let (log, rx) = state.now_and_future(q.q.as_deref()).await.unwrap();
 
         let mut log_event = Vec::new();
 
@@ -265,23 +265,19 @@ async fn request_log(
 
         let stream = stream::iter(log_event.into_iter())
             .chain(stream::unfold(
-                (rx, state2, query),
-                move |(mut rx, state, query)| async move {
+                (rx, state2, q),
+                move |(mut rx, state, q)| async move {
                     let id = rx.recv().await.unwrap();
-                    let req = state.request(id, query.q.as_deref()).await.unwrap();
+                    let req = state.request(id, q.q.as_deref()).await.unwrap();
 
                     if let Some(req) = req {
-                        Some((req_to_event(req, &state).await.unwrap(), (rx, state, query)))
+                        Some((req_to_event(req, &state).await.unwrap(), (rx, state, q)))
                     } else {
                         Some((
                             Event::default().event("request").data(replace_cr(
-                                &BlankRequestHtml {
-                                    id,
-                                    q: query.0.clone(),
-                                }
-                                .to_string(),
+                                &BlankRequestHtml { id, q: q.clone() }.to_string(),
                             )),
-                            (rx, state, query),
+                            (rx, state, q),
                         ))
                     }
                 },
