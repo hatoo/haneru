@@ -152,7 +152,7 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     } else {
         let uri = Uri::try_from(path.as_str())?;
         let buf = replace_path(buf).unwrap();
-        let cell = state.new_req("http://", uri.host().unwrap(), &buf).await?;
+        let cell = state.new_req("http", uri.host().unwrap(), &buf).await?;
         let mut server =
             TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
 
@@ -187,7 +187,7 @@ async fn conn_loop<
             return Ok(());
         };
         let cell = state
-            .new_req(&format!("{}://", scheme), base.host().unwrap(), &req)
+            .new_req(scheme.as_str(), base.host().unwrap(), &req)
             .await?;
 
         if has_upgrade {
