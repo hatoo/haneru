@@ -236,6 +236,7 @@ async fn request_log(
 
         let mut log_event = Vec::new();
 
+        // TODO: bulk select
         for req in log {
             log_event.push(req_to_event(req, &state).await?);
         }
