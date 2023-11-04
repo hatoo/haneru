@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::http::uri;
-use hyper::Uri;
+use axum::http::{uri, HeaderName, HeaderValue};
+use hyper::{HeaderMap, Uri};
 use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
 use sqlx::SqlitePool;
 use tokio::{
@@ -43,12 +43,12 @@ impl Proxy {
             .iter()
             .take_while(|h| h != &&httparse::EMPTY_HEADER)
             .map(|h| {
-                (
-                    h.name.to_string(),
-                    std::str::from_utf8(h.value).unwrap().to_string(),
-                )
+                Ok::<_, anyhow::Error>((
+                    HeaderName::try_from(h.name)?,
+                    HeaderValue::from_bytes(h.value)?,
+                ))
             })
-            .collect();
+            .collect::<Result<HeaderMap, _>>()?;
 
         let id = db::save_request(
             &self.pool,
@@ -107,6 +107,27 @@ impl Proxy {
 
         Ok((now, rx))
     }
+
+    async fn save_response(&self, id: i64, data: &[u8]) -> anyhow::Result<()> {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut parser = httparse::Response::new(&mut headers);
+        parser.parse(data)?;
+
+        let headers = parser
+            .headers
+            .iter()
+            .take_while(|h| h != &&httparse::EMPTY_HEADER)
+            .map(|h| {
+                Ok::<_, anyhow::Error>((
+                    HeaderName::try_from(h.name)?,
+                    HeaderValue::from_bytes(h.value)?,
+                ))
+            })
+            .collect::<Result<HeaderMap, _>>()?;
+
+        db::save_response(&self.pool, id, parser.code.unwrap() as _, &headers, data).await?;
+        Ok(())
+    }
 }
 
 pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
@@ -134,12 +155,12 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
         if has_upgrade {
             let resp = sniff(stream, server).await;
-            db::save_response(&state.pool, id, &resp).await?;
+            state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
         } else {
             let resp = read_resp(&mut server).await?.context("no resp")?;
             stream.write_all(resp.as_ref()).await?;
-            db::save_response(&state.pool, id, &resp).await?;
+            state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
             conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
         };
@@ -167,14 +188,14 @@ async fn conn_loop<
 
         if has_upgrade {
             let resp = sniff(client, server).await;
-            db::save_response(&state.pool, id, &resp).await?;
+            state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
             break;
         } else {
             server.write_all(&req).await?;
             let resp = read_resp(&mut server).await?.context("no resp")?;
             client.write_all(&resp).await?;
-            db::save_response(&state.pool, id, &resp).await?;
+            state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
         }
     }

@@ -8,7 +8,6 @@ use axum::{
 };
 use clap::Parser;
 use futures::{stream, Stream, StreamExt};
-use http::ParsedRequest;
 use httparse::Status;
 use hyper::{header, HeaderMap};
 use rcgen::CertificateParams;

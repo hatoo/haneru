@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    hash::Hash,
     ops::DerefMut,
 };
 
@@ -34,9 +35,16 @@ struct Req {
     pub data: Vec<u8>,
 }
 
+struct Header {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(sqlx::FromRow)]
 pub struct Response {
-    pub id: i64,
+    pub request_id: i64,
+    pub status: i64,
+    pub headers: HeaderMap,
     pub data: Vec<u8>,
 }
 
@@ -52,7 +60,7 @@ pub async fn save_request(
     method: &str,
     path: &str,
     version: &str,
-    headers: &HashMap<String, String>,
+    headers: &HeaderMap,
     data: &[u8],
 ) -> sqlx::Result<i64> {
     let mut tx = conn.begin().await?;
@@ -70,6 +78,8 @@ pub async fn save_request(
     .map(|r| r.last_insert_rowid())?;
 
     for (k, v) in headers {
+        let k = k.as_str();
+        let v = v.to_str().unwrap();
         sqlx::query!(
             "INSERT INTO request_headers (request_id, name, value) VALUES (?, ?, ?)",
             id,
@@ -97,10 +107,6 @@ pub async fn get_request(
     .await?;
 
     if let Some(req) = req {
-        struct Header {
-            pub name: String,
-            pub value: String,
-        }
         let headers = sqlx::query_as!(
             Header,
             "SELECT name, value FROM request_headers WHERE request_id = ?",
@@ -189,20 +195,79 @@ pub async fn get_response(
     executor: impl Executor<'_, Database = Sqlite> + Clone,
     id: i64,
 ) -> sqlx::Result<Option<Response>> {
-    let resp = sqlx::query_as!(Response, "SELECT id, data FROM responses WHERE id = ?", id,)
-        .fetch_optional(executor)
-        .await?;
+    pub struct Res {
+        pub request_id: i64,
+        pub status: i64,
+        pub data: Vec<u8>,
+    }
 
-    Ok(resp)
+    let resp = sqlx::query_as!(
+        Res,
+        "SELECT request_id, status, data FROM responses WHERE request_id = ?",
+        id,
+    )
+    .fetch_optional(executor.clone())
+    .await?;
+
+    if let Some(resp) = resp {
+        let mut headers = sqlx::query_as!(
+            Header,
+            "SELECT name, value FROM response_headers WHERE request_id = ?",
+            id,
+        )
+        .fetch(executor);
+
+        let mut header_map = HeaderMap::new();
+
+        while let Some(h) = headers.next().await {
+            let h = h?;
+            header_map.insert(
+                HeaderName::from_bytes(h.name.as_bytes()).unwrap(),
+                h.value.parse().unwrap(),
+            );
+        }
+
+        Ok(Some(Response {
+            request_id: resp.request_id,
+            status: resp.status,
+            headers: header_map,
+            data: resp.data,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 pub async fn save_response(
-    executor: impl Executor<'_, Database = Sqlite> + Clone,
+    conn: impl sqlx::Acquire<'_, Database = Sqlite>,
     id: i64,
+    status: i64,
+    headers: &HeaderMap,
     data: &[u8],
 ) -> sqlx::Result<()> {
-    sqlx::query!("INSERT INTO responses (id, data) VALUES (?, ?)", id, data)
-        .execute(executor)
+    let mut tx = conn.begin().await?;
+    sqlx::query!(
+        "INSERT INTO responses (request_id, status, data) VALUES (?, ?, ?)",
+        id,
+        status,
+        data
+    )
+    .execute(tx.as_mut())
+    .await?;
+
+    for (k, v) in headers.into_iter() {
+        let k = k.as_str();
+        let v = v.to_str().unwrap();
+        sqlx::query!(
+            "INSERT INTO response_headers (request_id, name, value) VALUES (?, ?, ?)",
+            id,
+            k,
+            v
+        )
+        .execute(tx.as_mut())
         .await?;
+    }
+    tx.commit().await?;
+
     Ok(())
 }

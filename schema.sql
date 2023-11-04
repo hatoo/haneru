@@ -17,14 +17,16 @@ CREATE TABLE IF NOT EXISTS request_headers (
 );
 
 CREATE TABLE IF NOT EXISTS responses (
-    id INTEGER PRIMARY KEY,
+    request_id INTEGER NOT NULL,
     timestamp TEXT NOT NULL DEFAULT (DATETIME('now', 'localtime')),
-    data blob NOT NULL
+    status INTEGER NOT NULL,
+    data blob NOT NULL,
+    foreign key(request_id) references requests(id)
 );
 
 CREATE TABLE IF NOT EXISTS response_headers (
-    response_id INTEGER NOT NULL,
+    request_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     value TEXT NOT NULL,
-    foreign key(response_id) references responses(id)
+    foreign key(request_id) references requests(id)
 );
