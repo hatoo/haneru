@@ -9,21 +9,56 @@ Log
     <button type="submit">Search</button>
 </form>
 
-<table>
-    <thead>
-        <tr>
-            <th>Serial</th>
-            <th>Timestamp</th>
-            <th>Host</th>
-            <th>Method</th>
-            <th>URL</th>
-            <th>Length</th>
-            <th>Content-Type</th>
-        </tr>
-    </thead>
-    <tbody hx-ext="sse" sse-connect="/sse/log{{q.query()}}" sse-swap="request" hx-swap="beforeend">
-    </tbody>
-</table>
-<div id="detail">
+<div class="split">
+    <div id="table">
+        <table>
+            <thead>
+                <tr>
+                    <th>Serial</th>
+                    <th>Timestamp</th>
+                    <th>Host</th>
+                    <th>Method</th>
+                    <th>URL</th>
+                    <th>Length</th>
+                    <th>Content-Type</th>
+                </tr>
+            </thead>
+            <tbody hx-ext="sse" sse-connect="/sse/log{{q.query()}}" sse-swap="request" hx-swap="beforeend">
+            </tbody>
+        </table>
+    </div>
+    <div id="detail">
+    </div>
 </div>
+
+<script>
+    Split(['#table', '#detail'], {
+        direction: 'vertical',
+    });
+</script>
+
+<style>
+    html,
+    body,
+    main,
+    .split {
+        height: 100%;
+    }
+
+    #table {
+        overflow-y: scroll;
+    }
+
+    .gutter {
+        background-color: #eee;
+        background-repeat: no-repeat;
+        background-position: 50%;
+    }
+
+    .gutter.gutter-vertical {
+        background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAFAQMAAABo7865AAAABlBMVEVHcEzMzMzyAv2sAAAAAXRSTlMAQObYZgAAABBJREFUeF5jOAMEEAIEEFwAn3kMwcB6I2AAAAAASUVORK5CYII=');
+        cursor: row-resize;
+    }
+</style>
+
 {% endblock content %}
