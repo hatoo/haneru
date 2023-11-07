@@ -1,3 +1,5 @@
+PRAGMA foreign_keys = true;
+
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY,
     timestamp TEXT NOT NULL DEFAULT (DATETIME('now', 'localtime')),
@@ -13,20 +15,20 @@ CREATE TABLE IF NOT EXISTS request_headers (
     request_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     value TEXT NOT NULL,
-    foreign key(request_id) references requests(id)
+    foreign key(request_id) references requests(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS responses (
-    request_id INTEGER NOT NULL,
+    request_id INTEGER UNIQUE NOT NULL,
     timestamp TEXT NOT NULL DEFAULT (DATETIME('now', 'localtime')),
     status INTEGER NOT NULL,
     data blob NOT NULL,
-    foreign key(request_id) references requests(id)
+    foreign key(request_id) references requests(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS response_headers (
     request_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     value TEXT NOT NULL,
-    foreign key(request_id) references requests(id)
+    foreign key(request_id) references requests(id) ON DELETE CASCADE
 );
