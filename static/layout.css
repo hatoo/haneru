@@ -1,0 +1,7 @@
+html {
+    margin-left: 4rem;
+}
+
+form textarea {
+    display: block;
+}
