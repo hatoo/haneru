@@ -54,8 +54,8 @@ impl Proxy {
             &self.pool,
             scheme,
             host,
-            parser.method.unwrap(),
-            parser.path.unwrap(),
+            parser.method.context("no method")?,
+            parser.path.context("no path")?,
             "HTTP/1.1",
             &headers,
             req,
@@ -130,7 +130,14 @@ impl Proxy {
             })
             .collect::<Result<HeaderMap, _>>()?;
 
-        db::save_response(&self.pool, id, parser.code.unwrap() as _, &headers, data).await?;
+        db::save_response(
+            &self.pool,
+            id,
+            parser.code.context("no code")? as _,
+            &headers,
+            data,
+        )
+        .await?;
         let _ = self.response_tx.send(id);
         Ok(())
     }
