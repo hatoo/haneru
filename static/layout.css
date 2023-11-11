@@ -2,6 +2,10 @@ html {
     margin-left: 4rem;
 }
 
+main {
+    font-family: monospace;
+}
+
 form textarea {
     display: block;
 }

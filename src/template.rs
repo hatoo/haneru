@@ -26,4 +26,11 @@ impl OngoingResponse {
             })
             .unwrap_or(Cow::Borrowed("Ongoing"))
     }
+
+    pub fn status(&self) -> String {
+        self.0
+            .as_ref()
+            .map(|r| r.status.to_string())
+            .unwrap_or_else(|| "Ongoing".to_string())
+    }
 }

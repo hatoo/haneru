@@ -169,6 +169,7 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         server.write_all(buf.as_ref()).await?;
 
         if has_upgrade {
+            dbg!("go sniff");
             let resp = sniff(stream, server).await;
             state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
@@ -178,6 +179,8 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 state.save_response(id, &resp).await?;
             } else {
                 db::save_response(&state.pool, id, 0, &HeaderMap::default(), &[]).await?;
+                stream.shutdown().await?;
+                return Ok(());
             }
             let _ = state.response_tx.send(id);
             conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
@@ -197,7 +200,7 @@ async fn conn_loop<
     state: Arc<Proxy>,
 ) -> anyhow::Result<()> {
     loop {
-        let Some((req, has_upgrade)) = read_req(&mut client).await? else {
+        let Ok(Some((req, has_upgrade))) = read_req(&mut client).await else {
             return Ok(());
         };
         let req = replace_path(req).unwrap();
@@ -215,10 +218,13 @@ async fn conn_loop<
             if let Some(resp) = read_resp(&mut server).await? {
                 client.write_all(&resp).await?;
                 state.save_response(id, &resp).await?;
+                let _ = state.response_tx.send(id);
             } else {
                 db::save_response(&state.pool, id, 0, &HeaderMap::default(), &[]).await?;
+                let _ = state.response_tx.send(id);
+                client.shutdown().await?;
+                return Ok(());
             }
-            let _ = state.response_tx.send(id);
         }
     }
     Ok(())
