@@ -144,13 +144,14 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
     println!("HTTP Proxy is Listening on http://{}/", addr);
 
     loop {
-        let (stream, _) = tcp_listener.accept().await?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = proxy::proxy(stream, state).await {
-                eprintln!("Error: {:?}", err);
-            }
-        });
+        if let Ok((stream, _)) = tcp_listener.accept().await {
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(err) = proxy::proxy(stream, state).await {
+                    eprintln!("Error: {:?}", err);
+                }
+            });
+        }
     }
 }
 
