@@ -1,8 +1,10 @@
 <div class="detail-split">
     <div id="request">
+        <h2>Request</h2>
         <pre><code>{{request_raw}}</code></pre>
     </div>
     <div id="response">
+        <h2>Response</h2>
         <div hx-trigger="load" hx-get="/response/{{request.id}}">
         </div>
     </div>
@@ -18,5 +20,9 @@
     .detail-split {
         display: flex;
         flex-direction: row;
+    }
+
+    #response {
+        margin-left: 0.33rem;
     }
 </style>
