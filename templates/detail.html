@@ -1,1 +1,22 @@
-<pre><code>{{request}}</code></pre>
+<div class="detail-split">
+    <div id="request">
+        <pre><code>{{request_raw}}</code></pre>
+    </div>
+    <div id="response">
+        <div hx-trigger="load" hx-get="/response/{{request.id}}">
+        </div>
+    </div>
+</div>
+
+<script>
+    Split(['#request', '#response'], {
+        direction: 'horizontal',
+    });
+</script>
+
+<style>
+    .detail-split {
+        display: flex;
+        flex-direction: row;
+    }
+</style>

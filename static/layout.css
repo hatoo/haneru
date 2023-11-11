@@ -20,3 +20,22 @@ td,
 th {
     padding: 0 0.5rem 0 0.5rem
 }
+
+pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-left: 0.33rem;
+}
+
+/* split.js */
+
+.gutter {
+    background-color: #aaa;
+    background-repeat: no-repeat;
+    background-position: 50%;
+}
+
+.gutter.gutter-vertical {
+    background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAFAQMAAABo7865AAAABlBMVEVHcEzMzMzyAv2sAAAAAXRSTlMAQObYZgAAABBJREFUeF5jOAMEEAIEEFwAn3kMwcB6I2AAAAAASUVORK5CYII=');
+    cursor: row-resize;
+}

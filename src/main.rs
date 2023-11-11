@@ -317,13 +317,15 @@ async fn request_log_serial(
 #[derive(Template)]
 #[template(path = "detail.html")]
 struct DetailHtml {
-    request: String,
+    request: db::Request,
+    request_raw: String,
 }
 
 async fn detail(Path(id): Path<i64>, state: State<Arc<Proxy>>) -> DetailHtml {
-    let request = state.request(id, None).await.unwrap();
-    let request = request
-        .map(|r| String::from_utf8_lossy(r.data.as_slice()).to_string())
-        .unwrap_or_default();
-    DetailHtml { request }
+    let request = state.request(id, None).await.unwrap().unwrap();
+    let request_raw = String::from_utf8_lossy(request.data.as_slice()).to_string();
+    DetailHtml {
+        request,
+        request_raw,
+    }
 }
