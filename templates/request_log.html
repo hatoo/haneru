@@ -23,7 +23,7 @@ Log
                     <th>Content-Type</th>
                 </tr>
             </thead>
-            <tbody hx-ext="sse" sse-connect="/sse/log{{q.query()}}" sse-swap="request" hx-swap="beforeend">
+            <tbody hx-ext="sse" sse-connect="/sse/log{{q.query()}}" sse-swap="request" hx-swap="afterbegin">
             </tbody>
         </table>
     </div>

@@ -5,3 +5,13 @@ html {
 form textarea {
     display: block;
 }
+
+table:not(:last-child),
+table th:not(:last-child),
+table td:not(:last-child) {
+    border-right: 1px solid;
+}
+
+table {
+    border-collapse: collapse;
+}
