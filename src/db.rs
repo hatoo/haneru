@@ -22,7 +22,7 @@ pub struct Request {
 
 impl Request {
     pub fn timestamp(&self) -> &str {
-        &self.timestamp.split_whitespace().nth(1).unwrap()
+        self.timestamp.split_whitespace().nth(1).unwrap()
     }
 }
 

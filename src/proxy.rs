@@ -98,13 +98,9 @@ impl Proxy {
 
         if let Some(last) = now.last() {
             let last_id = last.id;
-            loop {
-                if let Ok(next) = rx.try_recv() {
-                    if next > last_id {
-                        now.push(db::get_request(&self.pool, next, filter).await?.unwrap());
-                        break;
-                    }
-                } else {
+            while let Ok(next) = rx.try_recv() {
+                if next > last_id {
+                    now.push(db::get_request(&self.pool, next, filter).await?.unwrap());
                     break;
                 }
             }
