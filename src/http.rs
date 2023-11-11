@@ -127,13 +127,10 @@ pub fn parse_path(buf: &[u8]) -> Option<[String; 3]> {
 }
 
 pub fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
-    let mut i = 0;
+    let mut lines = buf.split_inclusive(|&b| b == b'\n');
 
-    while *buf.get(i)? != b'\r' {
-        i += 1;
-    }
-
-    let first_line = std::str::from_utf8(&buf[..i]).ok()?;
+    let first_line = lines.next()?.strip_suffix(b"\r\n")?;
+    let first_line = std::str::from_utf8(first_line).ok()?;
 
     let fst = first_line.split_whitespace().collect::<Vec<_>>();
     let uri = Uri::try_from(fst[1]).ok()?;
@@ -145,7 +142,20 @@ pub fn replace_path(buf: Vec<u8>) -> Option<Vec<u8>> {
     ret.extend(uri.path_and_query().unwrap().as_str().as_bytes());
     ret.push(b' ');
     ret.extend(fst[2].as_bytes());
-    ret.extend(&buf[i..]);
+    ret.extend(b"\r\n");
+
+    let mut in_header = true;
+
+    for line in lines {
+        if in_header {
+            if line == b"\r\n" {
+                in_header = false;
+            }
+            ret.extend(line.strip_prefix(b"Proxy-").unwrap_or(line));
+        } else {
+            ret.extend(line);
+        }
+    }
 
     Some(ret)
 }

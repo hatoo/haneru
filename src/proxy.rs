@@ -195,6 +195,7 @@ async fn conn_loop<
         let Some((req, has_upgrade)) = read_req(&mut client).await? else {
             return Ok(());
         };
+        let req = replace_path(req).unwrap();
         let id = state
             .new_req(scheme.as_str(), base.host().unwrap(), &req)
             .await?;
