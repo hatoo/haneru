@@ -7,6 +7,14 @@ form textarea {
     display: block;
 }
 
+nav ul li {
+    display: inline;
+}
+
+nav ul {
+    padding: 0;
+}
+
 table:not(:last-child),
 table th:not(:last-child),
 table td:not(:last-child) {
