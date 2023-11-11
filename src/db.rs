@@ -20,6 +20,12 @@ pub struct Request {
     pub data: Vec<u8>,
 }
 
+impl Request {
+    pub fn timestamp(&self) -> &str {
+        &self.timestamp.split_whitespace().nth(1).unwrap()
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct Req {
     pub id: i64,

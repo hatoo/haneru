@@ -15,3 +15,8 @@ table td:not(:last-child) {
 table {
     border-collapse: collapse;
 }
+
+td,
+th {
+    padding: 0 0.5rem 0 0.5rem
+}
