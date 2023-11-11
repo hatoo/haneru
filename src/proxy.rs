@@ -173,9 +173,12 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
         } else {
-            let resp = read_resp(&mut server).await?.context("no resp")?;
-            stream.write_all(resp.as_ref()).await?;
-            state.save_response(id, &resp).await?;
+            if let Some(resp) = read_resp(&mut server).await? {
+                stream.write_all(resp.as_ref()).await?;
+                state.save_response(id, &resp).await?;
+            } else {
+                db::save_response(&state.pool, id, 0, &HeaderMap::default(), &[]).await?;
+            }
             let _ = state.response_tx.send(id);
             conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
         };
@@ -209,9 +212,12 @@ async fn conn_loop<
             break;
         } else {
             server.write_all(&req).await?;
-            let resp = read_resp(&mut server).await?.context("no resp")?;
-            client.write_all(&resp).await?;
-            state.save_response(id, &resp).await?;
+            if let Some(resp) = read_resp(&mut server).await? {
+                client.write_all(&resp).await?;
+                state.save_response(id, &resp).await?;
+            } else {
+                db::save_response(&state.pool, id, 0, &HeaderMap::default(), &[]).await?;
+            }
             let _ = state.response_tx.send(id);
         }
     }
