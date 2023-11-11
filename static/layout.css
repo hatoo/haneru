@@ -1,9 +1,6 @@
 html {
     margin-left: 4rem;
-}
-
-main {
-    font-family: monospace;
+    font-family: Consolas, monospace;
 }
 
 form textarea {
