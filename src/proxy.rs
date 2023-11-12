@@ -137,6 +137,12 @@ impl Proxy {
         let _ = self.response_tx.send(id);
         Ok(())
     }
+
+    async fn no_resp(&self, id: i64) -> anyhow::Result<()> {
+        db::save_response(&self.pool, id, 0, &HeaderMap::default(), &[]).await?;
+        let _ = self.response_tx.send(id);
+        Ok(())
+    }
 }
 
 pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
@@ -165,7 +171,6 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         server.write_all(buf.as_ref()).await?;
 
         if has_upgrade {
-            dbg!("go sniff");
             let resp = sniff(stream, server).await;
             state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
@@ -174,8 +179,7 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 stream.write_all(resp.as_ref()).await?;
                 state.save_response(id, &resp).await?;
             } else {
-                db::save_response(&state.pool, id, 0, &HeaderMap::default(), &[]).await?;
-                stream.shutdown().await?;
+                state.no_resp(id).await?;
                 return Ok(());
             }
             let _ = state.response_tx.send(id);
@@ -211,14 +215,11 @@ async fn conn_loop<
             break;
         } else {
             server.write_all(&req).await?;
-            if let Some(resp) = read_resp(&mut server).await? {
+            if let Ok(Some(resp)) = read_resp(&mut server).await {
                 client.write_all(&resp).await?;
                 state.save_response(id, &resp).await?;
-                let _ = state.response_tx.send(id);
             } else {
-                db::save_response(&state.pool, id, 0, &HeaderMap::default(), &[]).await?;
-                let _ = state.response_tx.send(id);
-                client.shutdown().await?;
+                state.no_resp(id).await?;
                 return Ok(());
             }
         }
