@@ -4,6 +4,17 @@
 Log
 {% endblock subtitle %}
 {% block content %}
+
+<details>
+    <summary>Query</summary>
+    <pre><code class="language-sql">SELECT DISTINCT id FROM requests 
+JOIN request_headers ON requests.id = request_headers.request_id
+LEFT JOIN responses ON requests.id = responses.request_id
+LEFT JOIN response_headers ON requests.id = response_headers.request_id
+WHERE -- will be inserted here
+ORDER BY id ASC</code></pre>
+</details>
+
 <form hx-get="/log" hx-target="body" hx-push-url="true">
     <textarea name="q" cols="120" rows="4">{{q.value()}}</textarea>
     <button type="submit">Search</button>
@@ -18,7 +29,7 @@ Log
                     <th>Timestamp</th>
                     <th>Host</th>
                     <th>Method</th>
-                    <th>URL</th>
+                    <th>Path</th>
                     <th>Status</th>
                     <th>Length</th>
                     <th>Content-Type</th>
@@ -37,6 +48,7 @@ Log
     Split(['#table', '#detail'], {
         direction: 'vertical',
     });
+    hljs.highlightAll();
 </script>
 
 <style>
