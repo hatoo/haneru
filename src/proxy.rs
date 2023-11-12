@@ -147,7 +147,7 @@ impl Proxy {
 
 pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     mut stream: S,
-    state: Arc<Proxy>,
+    state: &Proxy,
 ) -> anyhow::Result<()> {
     let Some((buf, has_upgrade)) = read_req(&mut stream).await? else {
         return Ok(());
@@ -197,7 +197,7 @@ async fn conn_loop<
     mut server: S2,
     scheme: uri::Scheme,
     base: Uri,
-    state: Arc<Proxy>,
+    state: &Proxy,
 ) -> anyhow::Result<()> {
     loop {
         let Ok(Some((req, has_upgrade))) = read_req(&mut client).await else {
@@ -272,7 +272,7 @@ async fn sniff<
 async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     upgraded: S,
     uri: Uri,
-    state: Arc<Proxy>,
+    state: &Proxy,
 ) -> anyhow::Result<()> {
     let cert = make_cert(vec![uri.host().context("no host on path")?.to_string()]);
     let signed = cert.serialize_der_with_signer(root_cert().await)?;
