@@ -56,6 +56,7 @@ pub async fn add_schema(executor: impl Executor<'_, Database = Sqlite>) -> sqlx:
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn save_request(
     conn: impl sqlx::Acquire<'_, Database = Sqlite>,
     scheme: &str,
