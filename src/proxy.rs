@@ -158,6 +158,7 @@ pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     if method == "CONNECT" {
         let uri: Uri = path.parse()?;
         stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
+        stream.flush().await?;
         tunnel(stream, uri, state).await?;
     } else {
         let uri = Uri::try_from(path.as_str())?;
