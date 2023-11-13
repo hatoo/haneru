@@ -6,6 +6,10 @@ Log
 {% block content %}
 
 <details>
+    <summary>Schema</summary>
+    <pre><code class="language-sql">{% include "../schema.sql" %}</code></pre>
+</details>
+<details>
     <summary>Query</summary>
     <pre><code class="language-sql">SELECT DISTINCT id FROM requests 
 JOIN request_headers ON requests.id = request_headers.request_id
