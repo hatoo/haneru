@@ -3,8 +3,10 @@ use httparse::Status;
 use hyper::Uri;
 use tokio::io::AsyncReadExt;
 
+const MAX_HEADERS: usize = 100;
+
 fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut req = httparse::Request::new(&mut headers);
     match req.parse(buf) {
         Ok(Status::Complete(n)) => {
@@ -36,7 +38,7 @@ pub async fn read_req<S: AsyncReadExt + Unpin>(
             return Ok(None);
         };
     }
-    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut req = httparse::Request::new(&mut headers);
     req.parse(&buf).unwrap();
     let has_upgrade = headers.iter().any(|h| {
@@ -48,7 +50,7 @@ pub async fn read_req<S: AsyncReadExt + Unpin>(
 }
 
 fn is_response_end(buf: &[u8]) -> anyhow::Result<bool> {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut resp = httparse::Response::new(&mut headers);
     match resp.parse(buf) {
         Ok(Status::Complete(n)) => {
