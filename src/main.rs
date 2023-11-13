@@ -10,6 +10,7 @@ use clap::Parser;
 use futures::{stream, Stream, StreamExt};
 use hyper::header;
 use rcgen::CertificateParams;
+use rustls::ServerConfig;
 use sqlx::SqlitePool;
 use sse::replace_cr;
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -27,40 +28,57 @@ mod proxy;
 mod sse;
 mod template;
 
-static ROOT_CERT: tokio::sync::OnceCell<rcgen::Certificate> = tokio::sync::OnceCell::const_new();
-async fn root_cert() -> &'static rcgen::Certificate {
-    ROOT_CERT
-        .get_or_init(|| async {
-            let mut param = rcgen::CertificateParams::default();
+static ROOT_CERT: std::sync::OnceLock<rcgen::Certificate> = std::sync::OnceLock::new();
+fn root_cert() -> &'static rcgen::Certificate {
+    ROOT_CERT.get_or_init(|| {
+        let mut param = rcgen::CertificateParams::default();
 
-            param.distinguished_name = rcgen::DistinguishedName::new();
-            param.distinguished_name.push(
-                rcgen::DnType::CommonName,
-                rcgen::DnValue::Utf8String("<HANERU CA>".to_string()),
-            );
-            param.key_usages = vec![
-                rcgen::KeyUsagePurpose::KeyCertSign,
-                rcgen::KeyUsagePurpose::CrlSign,
-            ];
-            param.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-            rcgen::Certificate::from_params(param).unwrap()
-        })
-        .await
+        param.distinguished_name = rcgen::DistinguishedName::new();
+        param.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            rcgen::DnValue::Utf8String("<HANERU CA>".to_string()),
+        );
+        param.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        param.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        rcgen::Certificate::from_params(param).unwrap()
+    })
 }
 
-fn make_cert(hosts: Vec<String>) -> rcgen::Certificate {
-    let mut cert_params = CertificateParams::new(hosts);
-    cert_params
-        .key_usages
-        .push(rcgen::KeyUsagePurpose::DigitalSignature);
-    cert_params
-        .extended_key_usages
-        .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
-    cert_params
-        .extended_key_usages
-        .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
+fn server_config(host: String) -> Arc<ServerConfig> {
+    use moka::sync::Cache;
+    static CACHE: std::sync::OnceLock<Cache<String, Arc<ServerConfig>>> =
+        std::sync::OnceLock::new();
 
-    rcgen::Certificate::from_params(cert_params).unwrap()
+    CACHE
+        .get_or_init(|| Cache::new(256))
+        .get_with(host.clone(), || {
+            let mut cert_params = CertificateParams::new(vec![host.into()]);
+            cert_params
+                .key_usages
+                .push(rcgen::KeyUsagePurpose::DigitalSignature);
+            cert_params
+                .extended_key_usages
+                .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+            cert_params
+                .extended_key_usages
+                .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
+
+            let cert = rcgen::Certificate::from_params(cert_params).unwrap();
+            let signed = cert.serialize_der_with_signer(root_cert()).unwrap();
+            let private_key = cert.get_key_pair().serialize_der();
+            let server_config = ServerConfig::builder()
+                .with_safe_defaults()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![rustls::Certificate(signed)],
+                    rustls::PrivateKey(private_key),
+                )
+                .unwrap();
+            Arc::new(server_config)
+        })
 }
 
 #[derive(clap::Parser)]
@@ -128,7 +146,7 @@ async fn cert() -> impl IntoResponse {
         header::HeaderValue::from_static("attachment; filename=\"ca.crt\""),
     )]);
 
-    (headers, root_cert().await.serialize_pem().unwrap())
+    (headers, root_cert().serialize_pem().unwrap())
 }
 
 #[derive(Template)]

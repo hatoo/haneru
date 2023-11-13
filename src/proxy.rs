@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use anyhow::Context;
 use axum::http::{uri, HeaderName, HeaderValue};
 use hyper::{HeaderMap, Uri};
-use rustls::ServerConfig;
 use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -15,7 +12,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::{
     db,
     http::{parse_path, read_req, read_resp, replace_path},
-    make_cert, root_cert,
+    server_config,
 };
 
 pub struct Proxy {
@@ -231,18 +228,8 @@ impl Proxy {
         upgraded: S,
         uri: Uri,
     ) -> anyhow::Result<()> {
-        let cert = make_cert(vec![uri.host().context("no host on path")?.to_string()]);
-        let signed = cert.serialize_der_with_signer(root_cert().await)?;
-        let private_key = cert.get_key_pair().serialize_der();
-        let server_config = ServerConfig::builder()
-            .with_safe_defaults()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![rustls::Certificate(signed)],
-                rustls::PrivateKey(private_key),
-            )?;
-
-        let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let server_config = server_config(uri.host().context("no host on path")?.to_string());
+        let tls_acceptor = TlsAcceptor::from(server_config);
         let client = tls_acceptor.accept(upgraded).await?;
 
         // Connect to remote server
