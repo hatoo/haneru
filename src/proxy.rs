@@ -143,90 +143,141 @@ impl Proxy {
         let _ = self.response_tx.send(id);
         Ok(())
     }
-}
 
-pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
-    mut stream: S,
-    state: &Proxy,
-) -> anyhow::Result<()> {
-    let Some((buf, has_upgrade)) = read_req(&mut stream).await? else {
-        return Ok(());
-    };
-
-    let [method, path, _version] = parse_path(&buf).context("failed to parse the first line")?;
-
-    if method == "CONNECT" {
-        let uri: Uri = path.parse()?;
-        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
-        stream.flush().await?;
-        tunnel(stream, uri, state).await?;
-    } else {
-        let uri = Uri::try_from(path.as_str())?;
-        let buf = replace_path(buf).unwrap();
-        let id = state
-            .new_req("http", uri.authority().unwrap().as_str(), &buf)
-            .await?;
-        let mut server =
-            TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
-
-        server.write_all(buf.as_ref()).await?;
-
-        if has_upgrade {
-            let resp = sniff(stream, server).await;
-            state.save_response(id, &resp).await?;
-            let _ = state.response_tx.send(id);
-        } else {
-            if let Some(resp) = read_resp(&mut server).await? {
-                stream.write_all(resp.as_ref()).await?;
-                state.save_response(id, &resp).await?;
-            } else {
-                state.no_resp(id).await?;
-                return Ok(());
-            }
-            let _ = state.response_tx.send(id);
-            conn_loop(stream, server, uri::Scheme::HTTP, uri, state).await?;
-        };
-    }
-    Ok(())
-}
-
-async fn conn_loop<
-    S1: AsyncReadExt + AsyncWriteExt + Unpin,
-    S2: AsyncReadExt + AsyncWriteExt + Unpin,
->(
-    mut client: S1,
-    mut server: S2,
-    scheme: uri::Scheme,
-    base: Uri,
-    state: &Proxy,
-) -> anyhow::Result<()> {
-    loop {
-        let Ok(Some((req, has_upgrade))) = read_req(&mut client).await else {
+    pub async fn proxy<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &self,
+        mut stream: S,
+    ) -> anyhow::Result<()> {
+        let Some((buf, has_upgrade)) = read_req(&mut stream).await? else {
             return Ok(());
         };
-        let req = replace_path(req).unwrap();
-        let id = state
-            .new_req(scheme.as_str(), base.authority().unwrap().as_str(), &req)
-            .await?;
 
-        if has_upgrade {
-            server.write_all(&req).await?;
-            let resp = sniff(client, server).await;
-            state.save_response(id, &resp).await?;
-            let _ = state.response_tx.send(id);
-            break;
+        let [method, path, _version] =
+            parse_path(&buf).context("failed to parse the first line")?;
+
+        if method == "CONNECT" {
+            let uri: Uri = path.parse()?;
+            stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
+            stream.flush().await?;
+            self.tunnel(stream, uri).await?;
         } else {
-            server.write_all(&req).await?;
-            if let Ok(Some(resp)) = read_resp(&mut server).await {
-                client.write_all(&resp).await?;
-                state.save_response(id, &resp).await?;
+            let uri = Uri::try_from(path.as_str())?;
+            let buf = replace_path(buf).unwrap();
+            let id = self
+                .new_req("http", uri.authority().unwrap().as_str(), &buf)
+                .await?;
+            let mut server =
+                TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
+
+            server.write_all(buf.as_ref()).await?;
+
+            if has_upgrade {
+                let resp = sniff(stream, server).await;
+                self.save_response(id, &resp).await?;
+                let _ = self.response_tx.send(id);
             } else {
-                state.no_resp(id).await?;
+                if let Some(resp) = read_resp(&mut server).await? {
+                    stream.write_all(resp.as_ref()).await?;
+                    self.save_response(id, &resp).await?;
+                } else {
+                    self.no_resp(id).await?;
+                    return Ok(());
+                }
+                let _ = self.response_tx.send(id);
+                self.conn_loop(stream, server, uri::Scheme::HTTP, uri)
+                    .await?;
+            };
+        }
+        Ok(())
+    }
+    async fn conn_loop<
+        S1: AsyncReadExt + AsyncWriteExt + Unpin,
+        S2: AsyncReadExt + AsyncWriteExt + Unpin,
+    >(
+        &self,
+        mut client: S1,
+        mut server: S2,
+        scheme: uri::Scheme,
+        base: Uri,
+    ) -> anyhow::Result<()> {
+        loop {
+            let Ok(Some((req, has_upgrade))) = read_req(&mut client).await else {
                 return Ok(());
+            };
+            let req = replace_path(req).unwrap();
+            let id = self
+                .new_req(scheme.as_str(), base.authority().unwrap().as_str(), &req)
+                .await?;
+
+            if has_upgrade {
+                server.write_all(&req).await?;
+                let resp = sniff(client, server).await;
+                self.save_response(id, &resp).await?;
+                let _ = self.response_tx.send(id);
+                break;
+            } else {
+                server.write_all(&req).await?;
+                if let Ok(Some(resp)) = read_resp(&mut server).await {
+                    client.write_all(&resp).await?;
+                    self.save_response(id, &resp).await?;
+                } else {
+                    self.no_resp(id).await?;
+                    return Ok(());
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
+
+    async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &self,
+        upgraded: S,
+        uri: Uri,
+    ) -> anyhow::Result<()> {
+        let cert = make_cert(vec![uri.host().context("no host on path")?.to_string()]);
+        let signed = cert.serialize_der_with_signer(root_cert().await)?;
+        let private_key = cert.get_key_pair().serialize_der();
+        let server_config = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::Certificate(signed)],
+                rustls::PrivateKey(private_key),
+            )?;
+
+        let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let client = tls_acceptor.accept(upgraded).await?;
+
+        // Connect to remote server
+
+        let mut root_cert_store = rustls::RootCertStore::empty();
+        root_cert_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
+            OwnedTrustAnchor::from_subject_spki_name_constraints(
+                ta.subject,
+                ta.spki,
+                ta.name_constraints,
+            )
+        }));
+
+        let config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_root_certificates(root_cert_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let server =
+            TcpStream::connect(uri.authority().context("no authority")?.to_string()).await?;
+        let server = connector
+            .connect(
+                ServerName::try_from(uri.host().context("no host")?)?,
+                server,
+            )
+            .await?;
+
+        self.conn_loop(client, server, uri::Scheme::HTTPS, uri)
+            .await?;
+
+        Ok(())
+    }
 }
 
 async fn sniff<
@@ -269,52 +320,4 @@ async fn sniff<
         }
     }
     resp
-}
-
-async fn tunnel<S: AsyncReadExt + AsyncWriteExt + Unpin>(
-    upgraded: S,
-    uri: Uri,
-    state: &Proxy,
-) -> anyhow::Result<()> {
-    let cert = make_cert(vec![uri.host().context("no host on path")?.to_string()]);
-    let signed = cert.serialize_der_with_signer(root_cert().await)?;
-    let private_key = cert.get_key_pair().serialize_der();
-    let server_config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![rustls::Certificate(signed)],
-            rustls::PrivateKey(private_key),
-        )?;
-
-    let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-    let client = tls_acceptor.accept(upgraded).await?;
-
-    // Connect to remote server
-
-    let mut root_cert_store = rustls::RootCertStore::empty();
-    root_cert_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-        OwnedTrustAnchor::from_subject_spki_name_constraints(
-            ta.subject,
-            ta.spki,
-            ta.name_constraints,
-        )
-    }));
-
-    let config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(root_cert_store)
-        .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(config));
-    let server = TcpStream::connect(uri.authority().context("no authority")?.to_string()).await?;
-    let server = connector
-        .connect(
-            ServerName::try_from(uri.host().context("no host")?)?,
-            server,
-        )
-        .await?;
-
-    conn_loop(client, server, uri::Scheme::HTTPS, uri, state).await?;
-
-    Ok(())
 }

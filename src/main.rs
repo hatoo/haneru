@@ -135,7 +135,7 @@ async fn cert() -> impl IntoResponse {
 #[template(path = "live.html")]
 struct Live;
 
-async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
+async fn run_proxy(proxy: Arc<Proxy>) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
 
     let tcp_listener = TcpListener::bind(addr)
@@ -145,9 +145,9 @@ async fn run_proxy(state: Arc<Proxy>) -> anyhow::Result<()> {
 
     loop {
         if let Ok((stream, _)) = tcp_listener.accept().await {
-            let state = state.clone();
+            let proxy = proxy.clone();
             tokio::spawn(async move {
-                if let Err(err) = proxy::proxy(stream, &state).await {
+                if let Err(err) = proxy.proxy(stream).await {
                     eprintln!("Error: {:?}", err);
                 }
             });
