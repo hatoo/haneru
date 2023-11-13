@@ -174,7 +174,6 @@ impl Proxy {
             if has_upgrade {
                 let resp = sniff(stream, server).await;
                 self.save_response(id, &resp).await?;
-                let _ = self.response_tx.send(id);
             } else {
                 if let Some(resp) = read_resp(&mut server).await? {
                     stream.write_all(resp.as_ref()).await?;
@@ -183,7 +182,6 @@ impl Proxy {
                     self.no_resp(id).await?;
                     return Ok(());
                 }
-                let _ = self.response_tx.send(id);
                 self.conn_loop(stream, server, uri::Scheme::HTTP, uri)
                     .await?;
             };
@@ -213,7 +211,6 @@ impl Proxy {
                 server.write_all(&req).await?;
                 let resp = sniff(client, server).await;
                 self.save_response(id, &resp).await?;
-                let _ = self.response_tx.send(id);
                 break;
             } else {
                 server.write_all(&req).await?;
