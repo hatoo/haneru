@@ -209,6 +209,7 @@ async fn conn_loop<
             .await?;
 
         if has_upgrade {
+            server.write_all(&req).await?;
             let resp = sniff(client, server).await;
             state.save_response(id, &resp).await?;
             let _ = state.response_tx.send(id);
