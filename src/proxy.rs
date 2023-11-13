@@ -3,14 +3,14 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::http::{uri, HeaderName, HeaderValue};
 use hyper::{HeaderMap, Uri};
-use rustls::{OwnedTrustAnchor, ServerConfig, ServerName};
+use rustls::ServerConfig;
 use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::broadcast::{self, Sender},
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsAcceptor;
 
 use crate::{
     db,
@@ -247,28 +247,11 @@ impl Proxy {
 
         // Connect to remote server
 
-        let mut root_cert_store = rustls::RootCertStore::empty();
-        root_cert_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-            OwnedTrustAnchor::from_subject_spki_name_constraints(
-                ta.subject,
-                ta.spki,
-                ta.name_constraints,
-            )
-        }));
-
-        let config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth();
-        let connector = TlsConnector::from(Arc::new(config));
         let server =
             TcpStream::connect(uri.authority().context("no authority")?.to_string()).await?;
-        let server = connector
-            .connect(
-                ServerName::try_from(uri.host().context("no host")?)?,
-                server,
-            )
-            .await?;
+        let native_tls_connector = tokio_native_tls::native_tls::TlsConnector::new().unwrap();
+        let connector = tokio_native_tls::TlsConnector::from(native_tls_connector);
+        let server = connector.connect(uri.host().unwrap(), server).await?;
 
         self.conn_loop(client, server, uri::Scheme::HTTPS, uri)
             .await?;
