@@ -238,8 +238,7 @@ impl Proxy {
 
         // Connect to remote server
 
-        let server =
-            TcpStream::connect(uri.authority().context("no authority")?.to_string()).await?;
+        let server = TcpStream::connect(uri.authority().context("no authority")?.as_str()).await?;
         let native_tls_connector = tokio_native_tls::native_tls::TlsConnector::new().unwrap();
         let connector = tokio_native_tls::TlsConnector::from(native_tls_connector);
         let server = connector.connect(uri.host().unwrap(), server).await?;
