@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Context;
 use hyper::server::conn::Http;
@@ -11,11 +12,12 @@ use hyper::{Body, Client, Method, Request, Response, Server};
 use hyper_tls::HttpsConnector;
 use tokio_rustls::TlsAcceptor;
 
+use crate::proxy::Proxy;
 use crate::server_config;
 
 type HttpsClient = Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>;
 
-pub async fn run_proxy() {
+pub async fn run_proxy(state: Arc<Proxy>) {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3003));
 
     let https = HttpsConnector::new();
@@ -26,7 +28,12 @@ pub async fn run_proxy() {
 
     let make_service = make_service_fn(move |_| {
         let client = client.clone();
-        async move { Ok::<_, Infallible>(service_fn(move |req| proxy(client.clone(), req))) }
+        let state = state.clone();
+        async move {
+            Ok::<_, Infallible>(service_fn(move |req| {
+                proxy(state.clone(), client.clone(), req)
+            }))
+        }
     });
 
     let server = Server::bind(&addr)
@@ -41,9 +48,11 @@ pub async fn run_proxy() {
     }
 }
 
-async fn proxy(client: HttpsClient, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-    println!("req: {:?}", req);
-
+async fn proxy(
+    state: Arc<Proxy>,
+    client: HttpsClient,
+    req: Request<Body>,
+) -> Result<Response<Body>, hyper::Error> {
     if Method::CONNECT == req.method() {
         // Received an HTTP request like:
         // ```
@@ -62,7 +71,7 @@ async fn proxy(client: HttpsClient, req: Request<Body>) -> Result<Response<Body>
             let uri = req.uri().clone();
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = tunnel(client, upgraded, &uri).await {
+                    if let Err(e) = tunnel(state, client, upgraded, &uri).await {
                         eprintln!("server io error: {}", e);
                     };
                 }
@@ -72,13 +81,21 @@ async fn proxy(client: HttpsClient, req: Request<Body>) -> Result<Response<Body>
 
         Ok(Response::new(Body::empty()))
     } else {
-        client.request(req).await
+        let id = state.new_req2(&req).await.unwrap();
+        let res = client.request(req).await?;
+        state.save_response2(id, &res).await.unwrap();
+        Ok(res)
     }
 }
 
 // Create a TCP connection to host:port, build a tunnel between the connection and
 // the upgraded connection
-async fn tunnel(client: HttpsClient, upgraded: Upgraded, uri: &http::Uri) -> anyhow::Result<()> {
+async fn tunnel(
+    state: Arc<Proxy>,
+    client: HttpsClient,
+    upgraded: Upgraded,
+    uri: &http::Uri,
+) -> anyhow::Result<()> {
     let server_config = server_config(uri.host().context("no host on path")?.to_string());
     let tls_acceptor = TlsAcceptor::from(server_config);
     let conn = tls_acceptor.accept(upgraded).await?;
@@ -90,7 +107,7 @@ async fn tunnel(client: HttpsClient, upgraded: Upgraded, uri: &http::Uri) -> any
         .http1_title_case_headers(true)
         .serve_connection(
             conn,
-            service_fn(move |req| mitm(client.clone(), authority.clone(), req)),
+            service_fn(move |req| mitm(state.clone(), client.clone(), authority.clone(), req)),
         )
         .await?;
 
@@ -98,17 +115,19 @@ async fn tunnel(client: HttpsClient, upgraded: Upgraded, uri: &http::Uri) -> any
 }
 
 async fn mitm(
+    state: Arc<Proxy>,
     client: HttpsClient,
     authority: String,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, hyper::Error> {
-    println!("req: {:?}", req);
-
     let uri = req.uri().clone();
     let mut parts = uri.into_parts();
     parts.scheme = Some(http::uri::Scheme::HTTPS);
     parts.authority = Some(http::uri::Authority::from_str(&authority).unwrap());
     *req.uri_mut() = http::Uri::from_parts(parts).unwrap();
 
-    client.request(req).await
+    let id = state.new_req2(&req).await.unwrap();
+    let res = client.request(req).await?;
+    state.save_response2(id, &res).await.unwrap();
+    Ok(res)
 }

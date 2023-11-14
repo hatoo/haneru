@@ -134,8 +134,8 @@ async fn main() {
     // `axum::Server` is a re-export of `hyper::Server`
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     println!("Listening on http://{}/", addr);
-    tokio::spawn(run_proxy(state));
-    tokio::spawn(proxy2::run_proxy());
+    tokio::spawn(run_proxy(state.clone()));
+    tokio::spawn(proxy2::run_proxy(state));
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await

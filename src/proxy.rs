@@ -1,6 +1,7 @@
 use anyhow::Context;
 use axum::http::{uri, HeaderName, HeaderValue};
-use hyper::{HeaderMap, Uri};
+use http::{uri::Scheme, Request, Response};
+use hyper::{Body, HeaderMap, Uri};
 use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -28,6 +29,35 @@ impl Proxy {
             response_tx,
             pool,
         }
+    }
+
+    pub async fn new_req2(&self, req: &Request<Body>) -> anyhow::Result<i64> {
+        let uri = req.uri();
+        let id = db::save_request(
+            &self.pool,
+            uri.scheme().unwrap().as_str(),
+            uri.authority().unwrap().as_str(),
+            req.method().as_str(),
+            uri.path_and_query().unwrap().as_str(),
+            "http/1.1",
+            &HeaderMap::default(),
+            &[],
+        )
+        .await?;
+        let _ = self.request_tx.send(id);
+
+        Ok(id)
+    }
+    pub async fn save_response2(&self, id: i64, res: &Response<Body>) -> anyhow::Result<()> {
+        let headers = res
+            .headers()
+            .iter()
+            .map(|(k, v)| Ok::<_, anyhow::Error>((k.clone(), v.clone())))
+            .collect::<Result<HeaderMap, _>>()?;
+
+        db::save_response(&self.pool, id, res.status().as_u16() as _, &headers, &[]).await?;
+        let _ = self.response_tx.send(id);
+        Ok(())
     }
 
     pub async fn new_req(&self, scheme: &str, host: &str, req: &[u8]) -> anyhow::Result<i64> {
