@@ -151,14 +151,13 @@ impl Proxy {
 
         let [method, path, _version] =
             parse_path(&buf).context("failed to parse the first line")?;
+        let uri: Uri = path.parse()?;
 
         if method == "CONNECT" {
-            let uri: Uri = path.parse()?;
             stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
             stream.flush().await?;
             self.tunnel(stream, uri).await?;
         } else {
-            let uri = Uri::try_from(path.as_str())?;
             let buf = replace_path(buf).unwrap();
             let id = self
                 .new_req("http", uri.authority().unwrap().as_str(), &buf)
