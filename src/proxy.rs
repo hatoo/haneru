@@ -214,12 +214,14 @@ impl Proxy {
                 break;
             } else {
                 server.write_all(&req).await?;
+                server.flush().await?;
                 if let Ok(Some(resp)) = read_resp(&mut server).await {
                     client.write_all(&resp).await?;
                     client.flush().await?;
                     self.save_response(id, &resp).await?;
                 } else {
                     self.no_resp(id).await?;
+                    client.shutdown().await?;
                     return Ok(());
                 }
             }
