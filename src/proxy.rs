@@ -221,7 +221,6 @@ impl Proxy {
                     self.save_response(id, &resp).await?;
                 } else {
                     self.no_resp(id).await?;
-                    client.shutdown().await?;
                     return Ok(());
                 }
             }
