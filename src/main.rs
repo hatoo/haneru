@@ -25,6 +25,7 @@ use crate::proxy::Proxy;
 mod db;
 mod http;
 mod proxy;
+mod proxy2;
 mod sse;
 mod template;
 
@@ -134,6 +135,7 @@ async fn main() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     println!("Listening on http://{}/", addr);
     tokio::spawn(run_proxy(state));
+    tokio::spawn(proxy2::run_proxy());
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await

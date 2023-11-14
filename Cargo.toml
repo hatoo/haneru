@@ -24,3 +24,5 @@ sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "json"] }
 serde = { version = "1.0.190", features = ["derive"] }
 tokio-native-tls = "0.3.1"
 moka = { version = "0.12.1", features = ["sync"] }
+http = "0.2.11"
+hyper-tls = "0.5.0"
