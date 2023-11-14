@@ -3,7 +3,7 @@ use httparse::Status;
 use hyper::Uri;
 use tokio::io::AsyncReadExt;
 
-const MAX_HEADERS: usize = 100;
+pub const MAX_HEADERS: usize = 100;
 
 fn is_request_end(buf: &[u8]) -> anyhow::Result<bool> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];

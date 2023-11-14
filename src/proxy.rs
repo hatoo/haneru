@@ -31,7 +31,7 @@ impl Proxy {
     }
 
     pub async fn new_req(&self, scheme: &str, host: &str, req: &[u8]) -> anyhow::Result<i64> {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut headers = [httparse::EMPTY_HEADER; crate::http::MAX_HEADERS];
         let mut parser = httparse::Request::new(&mut headers);
         parser.parse(req)?;
 
@@ -107,7 +107,7 @@ impl Proxy {
     }
 
     async fn save_response(&self, id: i64, data: &[u8]) -> anyhow::Result<()> {
-        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut headers = [httparse::EMPTY_HEADER; crate::http::MAX_HEADERS];
         let mut parser = httparse::Response::new(&mut headers);
         parser.parse(data)?;
 
@@ -167,6 +167,7 @@ impl Proxy {
                 TcpStream::connect((uri.host().unwrap(), uri.port_u16().unwrap_or(80))).await?;
 
             server.write_all(buf.as_ref()).await?;
+            server.flush().await?;
 
             if has_upgrade {
                 let resp = sniff(stream, server).await;
@@ -174,6 +175,7 @@ impl Proxy {
             } else {
                 if let Some(resp) = read_resp(&mut server).await? {
                     stream.write_all(resp.as_ref()).await?;
+                    stream.flush().await?;
                     self.save_response(id, &resp).await?;
                 } else {
                     self.no_resp(id).await?;
@@ -206,6 +208,7 @@ impl Proxy {
 
             if has_upgrade {
                 server.write_all(&req).await?;
+                server.flush().await?;
                 let resp = sniff(client, server).await;
                 self.save_response(id, &resp).await?;
                 break;
@@ -213,6 +216,7 @@ impl Proxy {
                 server.write_all(&req).await?;
                 if let Ok(Some(resp)) = read_resp(&mut server).await {
                     client.write_all(&resp).await?;
+                    client.flush().await?;
                     self.save_response(id, &resp).await?;
                 } else {
                     self.no_resp(id).await?;
