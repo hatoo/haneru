@@ -1,7 +1,10 @@
 use anyhow::Context;
-use axum::http::{uri, HeaderName, HeaderValue};
+use axum::{
+    body::Full,
+    http::{uri, HeaderName, HeaderValue},
+};
 use http::{uri::Scheme, Request, Response};
-use hyper::{Body, HeaderMap, Uri};
+use hyper::{body::Bytes, Body, HeaderMap, Uri};
 use sqlx::SqlitePool;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -31,19 +34,8 @@ impl Proxy {
         }
     }
 
-    pub async fn new_req2(&self, req: &Request<Body>) -> anyhow::Result<i64> {
-        let uri = req.uri();
-        let id = db::save_request(
-            &self.pool,
-            uri.scheme().unwrap().as_str(),
-            uri.authority().unwrap().as_str(),
-            req.method().as_str(),
-            uri.path_and_query().unwrap().as_str(),
-            "http/1.1",
-            &HeaderMap::default(),
-            &[],
-        )
-        .await?;
+    pub async fn new_req2(&self, parts: &http::request::Parts, body: &[u8]) -> anyhow::Result<i64> {
+        let id = db::save_request2(&self.pool, parts, body).await?;
         let _ = self.request_tx.send(id);
 
         Ok(id)

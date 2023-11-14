@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, ops::DerefMut};
 
-use axum::http::HeaderName;
+use anyhow::Context;
+use axum::{body::Full, http::HeaderName};
 use futures::StreamExt;
-use hyper::HeaderMap;
+use hyper::{body::Bytes, Body, HeaderMap};
 use sqlx::{Executor, Sqlite};
 
 const SCHEMA_SQL: &str = include_str!("../schema.sql");
@@ -82,6 +83,47 @@ pub async fn save_request(
     .map(|r| r.last_insert_rowid())?;
 
     for (k, v) in headers {
+        let k = k.as_str();
+        let v = v.to_str().unwrap();
+        sqlx::query!(
+            "INSERT INTO request_headers (request_id, name, value) VALUES (?, ?, ?)",
+            id,
+            k,
+            v
+        )
+        .execute(tx.deref_mut())
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn save_request2(
+    conn: impl sqlx::Acquire<'_, Database = Sqlite>,
+    parts: &http::request::Parts,
+    body: &[u8],
+) -> anyhow::Result<i64> {
+    let mut tx = conn.begin().await?;
+    let scheme = parts.uri.scheme_str().context("no scheme")?;
+    let authority = parts.uri.authority().context("no authority")?.as_str();
+    let method = parts.method.as_str();
+    let path = parts.uri.path_and_query().context("no path")?.as_str();
+    let version = format!("{:?}", parts.version);
+    let id = sqlx::query!(
+        "INSERT INTO requests (scheme, host, method, path, version, data) VALUES (?, ?, ?, ?, ?, ?)",
+        scheme,
+        authority,
+        method,
+        path,
+        version,
+        body
+    )
+    .execute( tx.deref_mut())
+    .await
+    .map(|r| r.last_insert_rowid())?;
+
+    for (k, v) in &parts.headers {
         let k = k.as_str();
         let v = v.to_str().unwrap();
         sqlx::query!(

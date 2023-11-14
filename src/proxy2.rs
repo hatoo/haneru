@@ -4,6 +4,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Context;
+use axum::body::Full;
+use hyper::body::{to_bytes, Bytes};
 use hyper::server::conn::Http;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::upgrade::Upgraded;
@@ -15,7 +17,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::proxy::Proxy;
 use crate::server_config;
 
-type HttpsClient = Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>;
+type HttpsClient = Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>, Full<Bytes>>;
 
 pub async fn run_proxy(state: Arc<Proxy>) {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3003));
@@ -24,7 +26,7 @@ pub async fn run_proxy(state: Arc<Proxy>) {
     let client = Client::builder()
         .http1_title_case_headers(true)
         .http1_preserve_header_case(true)
-        .build::<_, hyper::Body>(https);
+        .build::<_, _>(https);
 
     let make_service = make_service_fn(move |_| {
         let client = client.clone();
@@ -81,7 +83,11 @@ async fn proxy(
 
         Ok(Response::new(Body::empty()))
     } else {
-        let id = state.new_req2(&req).await.unwrap();
+        let (parts, body) = req.into_parts();
+        let body = to_bytes(body).await?;
+
+        let id = state.new_req2(&parts, &body).await.unwrap();
+        let req = Request::from_parts(parts, Full::from(body));
         let res = client.request(req).await?;
         state.save_response2(id, &res).await.unwrap();
         Ok(res)
@@ -126,7 +132,12 @@ async fn mitm(
     parts.authority = Some(http::uri::Authority::from_str(&authority).unwrap());
     *req.uri_mut() = http::Uri::from_parts(parts).unwrap();
 
-    let id = state.new_req2(&req).await.unwrap();
+    let (parts, body) = req.into_parts();
+    let body = to_bytes(body).await?;
+
+    let id = state.new_req2(&parts, &body).await.unwrap();
+
+    let req = Request::from_parts(parts, Full::from(body));
     let res = client.request(req).await?;
     state.save_response2(id, &res).await.unwrap();
     Ok(res)
