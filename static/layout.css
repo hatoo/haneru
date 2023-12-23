@@ -1,0 +1,57 @@
+html {
+    margin-left: 4rem;
+    font-family: Consolas, monospace;
+}
+
+form textarea {
+    display: block;
+}
+
+nav ul li {
+    display: inline;
+}
+
+nav ul {
+    padding: 0;
+}
+
+table:not(:last-child),
+table th:not(:last-child),
+table td:not(:last-child) {
+    border-right: 1px solid;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+td {
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+    max-width: 40vw;
+}
+
+td,
+th {
+    padding: 0 0.5rem 0 0.5rem
+}
+
+pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* split.js */
+
+.gutter {
+    background-color: #aaa;
+    background-repeat: no-repeat;
+    background-position: 50%;
+}
+
+.gutter.gutter-vertical {
+    background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAFAQMAAABo7865AAAABlBMVEVHcEzMzMzyAv2sAAAAAXRSTlMAQObYZgAAABBJREFUeF5jOAMEEAIEEFwAn3kMwcB6I2AAAAAASUVORK5CYII=');
+    cursor: row-resize;
+}
