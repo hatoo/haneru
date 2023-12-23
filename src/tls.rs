@@ -6,7 +6,7 @@ use rustls::{
     ServerConfig,
 };
 
-static ROOT_CERT: std::sync::OnceLock<rcgen::Certificate> = std::sync::OnceLock::new();
+pub static ROOT_CERT: std::sync::OnceLock<rcgen::Certificate> = std::sync::OnceLock::new();
 pub fn root_cert() -> &'static rcgen::Certificate {
     ROOT_CERT.get_or_init(|| {
         let mut param = rcgen::CertificateParams::default();
@@ -54,11 +54,12 @@ pub fn server_config21(host: String) -> Arc<rustls21::ServerConfig> {
     let cert = rcgen::generate_simple_self_signed(vec![host]).unwrap();
     let private_key = cert.get_key_pair().serialize_der();
 
+    let signed = cert.serialize_der_with_signer(root_cert()).unwrap();
     let mut server_config = rustls21::ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(
-            vec![rustls21::Certificate(cert.serialize_der().unwrap())],
+            vec![rustls21::Certificate(signed)],
             rustls21::PrivateKey(private_key),
         )
         .unwrap();
